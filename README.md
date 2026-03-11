@@ -17,6 +17,7 @@ Turnstone gives LLMs tools — shell, files, search, web, planning — and orche
 - **Queue-driven agents** — trigger workstreams via message queue, stream progress, approve or auto-approve tool use
 - **Multi-node clusters** — generic work load-balances across nodes, directed work routes to a specific server
 - **Cluster dashboard** — real-time view of all nodes and workstreams, workstream creation with node targeting, reverse proxy for server UIs (only the console port needs network access)
+- **Governance & compliance** — role-based access control, tool policies, usage tracking, and append-only audit logs
 - **Cluster simulator** — test the stack at scale (up to 1000 nodes) without an LLM backend
 
 <p align="center">
@@ -127,6 +128,23 @@ Detailed UML diagrams are available in [`docs/diagrams/`](docs/diagrams/):
 | [Deployment](docs/diagrams/png/12-deployment.png) | Docker Compose service topology |
 | [SDK Architecture](docs/diagrams/png/13-sdk-architecture.png) | Python + TypeScript client libraries |
 | [Storage Architecture](docs/diagrams/png/14-storage-architecture.png) | Pluggable database backends (SQLite + PostgreSQL) |
+| [Auth Architecture](docs/diagrams/png/15-auth-architecture.png) | JWT, scopes, token types, login flows |
+| [Channel Architecture](docs/diagrams/png/16-channel-architecture.png) | Discord/Slack adapter protocol and routing |
+| [Notify Flow](docs/diagrams/png/17-notify-flow.png) | Channel notification dispatch |
+| [Watch Architecture](docs/diagrams/png/18-watch-architecture.png) | Periodic command polling daemon |
+| [Governance Architecture](docs/diagrams/png/19-governance-architecture.png) | RBAC, policies, audit, usage enforcement flow |
+
+### Governance
+
+Turnstone includes a built-in governance layer for enterprise deployments — manage who can do what, which tools run unattended, and where every token goes.
+
+- **RBAC** — 15 granular permissions, 3 built-in roles (admin / operator / viewer), custom roles, privilege escalation prevention
+- **Tool policies** — glob-pattern rules (`allow` / `deny` / `ask`) with priority ordering; automate approvals or lock down dangerous tools
+- **Prompt templates** — reusable system messages with `{{variable}}` substitution and categories
+- **Usage tracking** — per-request token and tool metrics, aggregation by day / model / user, automatic 90-day pruning
+- **Audit logging** — append-only event trail for all admin mutations, IP-aware, 365-day retention
+
+All governance features are managed through the console admin panel (10 tabs) and the full REST API. See [docs/governance.md](docs/governance.md) for setup and configuration.
 
 ## Multi-node routing
 
@@ -151,7 +169,7 @@ Bridges BLPOP from their per-node queue (priority) then the shared queue. Direct
 
 ## Tools
 
-15 built-in tools, 2 agent tools, plus external tools via MCP:
+16 built-in tools, 2 agent tools, plus external tools via MCP:
 
 | Tool | Description | Auto-approved |
 |------|-------------|:---:|
@@ -168,6 +186,7 @@ Bridges BLPOP from their per-node queue (priority) then the shared queue. Direct
 | `recall` | Search memories and history | yes |
 | `forget` | Remove a memory | yes |
 | `notify` | Send notifications to linked channels | yes |
+| `watch` | Periodic command polling with conditions | |
 | `task` | Spawn autonomous sub-agent | |
 | `plan` | Explore codebase, write .plan.md | |
 | `mcp__*` | External tools from MCP servers | |
