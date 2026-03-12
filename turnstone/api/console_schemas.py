@@ -347,4 +347,25 @@ class AuditEventInfo(BaseModel):
 
 class ListAuditEventsResponse(BaseModel):
     events: list[AuditEventInfo]
+
+
+# ---------------------------------------------------------------------------
+# Channels
+# ---------------------------------------------------------------------------
+
+
+class ChannelUserInfo(BaseModel):
+    channel_type: str
+    channel_user_id: str
+    user_id: str
+    created: str
+
+
+class ListChannelUsersResponse(BaseModel):
+    channels: list[ChannelUserInfo]
+
+
+class CreateChannelUserRequest(BaseModel):
+    channel_type: str = Field(..., description="Channel type (e.g. discord, slack)")
+    channel_user_id: str = Field(..., description="External channel user identifier")
     total: int
