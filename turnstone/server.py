@@ -1013,6 +1013,7 @@ async def create_workstream(request: Request) -> JSONResponse:
     skip: bool = request.app.state.skip_permissions
     auth = getattr(getattr(request, "state", None), "auth_result", None)
     uid: str = getattr(auth, "user_id", "") or ""
+    body_template = body.get("template", "")
     try:
         ws = mgr.create(
             name=body.get("name", ""),
@@ -1059,6 +1060,19 @@ async def create_workstream(request: Request) -> JSONResponse:
                     history = _build_history(ws.session)
                     if history:
                         ui._enqueue({"type": "history", "messages": history})
+
+        # Per-workstream template override — only when not resumed (resumed
+        # workstreams restore their own template from workstream_config).
+        if body_template and not resumed and ws.session:
+            from turnstone.core.memory import get_prompt_template_by_name
+
+            if not get_prompt_template_by_name(body_template):
+                # Workstream already created — close it and return error
+                mgr.close(ws.id)
+                return JSONResponse(
+                    {"error": f"Template not found: {body_template}"}, status_code=400
+                )
+            ws.session.set_template(body_template)
 
         return JSONResponse(
             {
@@ -1375,6 +1389,11 @@ def main() -> None:
         "--instructions",
         default=None,
         help="Developer instructions injected as developer message",
+    )
+    parser.add_argument(
+        "--template",
+        default=None,
+        help="Prompt template name (replaces default templates)",
     )
     parser.add_argument(
         "--temperature",
@@ -1720,6 +1739,7 @@ def main() -> None:
             tool_search=args.tool_search,
             tool_search_threshold=args.tool_search_threshold,
             tool_search_max_results=args.tool_search_max_results,
+            template=args.template,
         )
 
     # Create WatchRunner (periodic command polling, server-level)

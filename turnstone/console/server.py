@@ -349,6 +349,7 @@ async def create_workstream(request: Request) -> JSONResponse:
     raw_name = body.get("name", "")
     raw_model = body.get("model", "")
     raw_initial_message = body.get("initial_message", "")
+    raw_template = body.get("template", "")
     if not isinstance(raw_node_id, str):
         raw_node_id = "" if raw_node_id is None else None
     if not isinstance(raw_name, str):
@@ -357,20 +358,32 @@ async def create_workstream(request: Request) -> JSONResponse:
         raw_model = "" if raw_model is None else None
     if not isinstance(raw_initial_message, str):
         raw_initial_message = "" if raw_initial_message is None else None
-    if raw_node_id is None or raw_name is None or raw_model is None or raw_initial_message is None:
+    if not isinstance(raw_template, str):
+        raw_template = "" if raw_template is None else None
+    if (
+        raw_node_id is None
+        or raw_name is None
+        or raw_model is None
+        or raw_initial_message is None
+        or raw_template is None
+    ):
         return JSONResponse(
-            {"error": "node_id, name, model, and initial_message must be strings"}, status_code=400
+            {"error": "node_id, name, model, initial_message, and template must be strings"},
+            status_code=400,
         )
     node_id = raw_node_id
     name = raw_name[:256]
     model = raw_model[:128]
     initial_message = raw_initial_message[:4096]
+    template = raw_template[:256]
 
     from turnstone.mq.protocol import CreateWorkstreamMessage
 
     # General pool — push to shared queue, any bridge picks it up
     if node_id == "pool":
-        msg = CreateWorkstreamMessage(name=name, model=model, initial_message=initial_message)
+        msg = CreateWorkstreamMessage(
+            name=name, model=model, initial_message=initial_message, template=template
+        )
         broker.push_inbound(msg.to_json())
         log.debug("Pool dispatch: correlation_id=%s name=%r", msg.correlation_id, name)
         return JSONResponse(
@@ -397,6 +410,7 @@ async def create_workstream(request: Request) -> JSONResponse:
         model=model,
         target_node=node_id,
         initial_message=initial_message,
+        template=template,
     )
     broker.push_inbound(msg.to_json(), node_id=node_id)
 
@@ -1130,12 +1144,15 @@ async def admin_create_schedule(request: Request) -> JSONResponse:
     auto_approve = bool(body.get("auto_approve", False))
     raw_tools = body.get("auto_approve_tools", [])
     auto_approve_tools = raw_tools if isinstance(raw_tools, list) else []
+    template = str(body.get("template", "")).strip()[:256]
     enabled = bool(body.get("enabled", True))
 
     if not name:
         return JSONResponse({"error": "name is required"}, status_code=400)
     if not initial_message:
         return JSONResponse({"error": "initial_message is required"}, status_code=400)
+    if template and not storage.get_prompt_template_by_name(template):
+        return JSONResponse({"error": f"Template not found: {template}"}, status_code=400)
 
     validation_err = _validate_schedule_fields(schedule_type, cron_expr, at_time)
     if validation_err:
@@ -1170,6 +1187,7 @@ async def admin_create_schedule(request: Request) -> JSONResponse:
         auto_approve_tools=auto_approve_tools,
         created_by=created_by,
         next_run=next_run if enabled else "",
+        template=template,
     )
 
     if not enabled:
@@ -1244,6 +1262,11 @@ async def admin_update_schedule(request: Request) -> JSONResponse:
     if "auto_approve_tools" in body:
         raw = body["auto_approve_tools"]
         updates["auto_approve_tools"] = raw if isinstance(raw, list) else []
+    if "template" in body:
+        tpl_name = str(body["template"]).strip()[:256]
+        if tpl_name and not storage.get_prompt_template_by_name(tpl_name):
+            return JSONResponse({"error": f"Template not found: {tpl_name}"}, status_code=400)
+        updates["template"] = tpl_name
     if "enabled" in body:
         updates["enabled"] = bool(body["enabled"])
 
@@ -2014,7 +2037,7 @@ async def admin_create_template(request: Request) -> JSONResponse:
         return body
 
     name = str(body.get("name", "")).strip()[:256]
-    content = str(body.get("content", "")).strip()
+    content = str(body.get("content", "")).strip()[:32768]
     category = str(body.get("category", "general")).strip()[:64]
     variables = str(body.get("variables", "[]")).strip()
     try:
@@ -2085,7 +2108,7 @@ async def admin_update_template(request: Request) -> JSONResponse:
     if "name" in body:
         updates["name"] = str(body["name"]).strip()[:256]
     if "content" in body:
-        updates["content"] = str(body["content"]).strip()
+        updates["content"] = str(body["content"]).strip()[:32768]
     if "category" in body:
         updates["category"] = str(body["category"]).strip()[:64]
     if "variables" in body:
