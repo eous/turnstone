@@ -97,6 +97,7 @@ class WebUI:
         self._ws_completion_tokens: int = 0
         self._ws_messages: int = 0
         self._ws_tool_calls: dict[str, int] = {}
+        self._ws_tool_calls_reported: int = 0  # last cumulative total sent to usage
         self._ws_context_ratio: float = 0.0
         # Activity tracking for dashboard (current tool / thinking / approval)
         self._ws_current_activity: str = ""
@@ -308,7 +309,9 @@ class WebUI:
             self._ws_prompt_tokens += usage["prompt_tokens"]
             self._ws_completion_tokens += usage["completion_tokens"]
             self._ws_context_ratio = total_tok / context_window if context_window > 0 else 0.0
-            tool_count = sum(self._ws_tool_calls.values())
+            tool_total = sum(self._ws_tool_calls.values())
+            tool_count = tool_total - self._ws_tool_calls_reported
+            self._ws_tool_calls_reported = tool_total
         self._enqueue(
             {
                 "type": "status",
