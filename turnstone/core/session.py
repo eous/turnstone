@@ -3549,6 +3549,16 @@ class ChatSession:
         "and functions in every step."
     )
 
+    def _plan_system_content(self) -> str:
+        """Plan agent system message: template guardrails + plan identity."""
+        if not self._template_content:
+            return self._PLAN_IDENTITY
+        tpl = self._template_content
+        if len(tpl) > _MAX_TEMPLATE_CONTENT:
+            log.warning("template_content.truncated", length=len(tpl), agent="plan")
+            tpl = tpl[:_MAX_TEMPLATE_CONTENT]
+        return tpl + "\n\n" + self._PLAN_IDENTITY
+
     _MIN_PLAN_LENGTH = 100
     _PLAN_REQUIRED_SECTIONS = ("## goal", "## current state", "## plan", "## risks")
     _MIN_PLAN_SECTIONS = 2
@@ -3626,10 +3636,11 @@ class ChatSession:
                                 prior_plan_msgs = [msg, self.messages[j]]
                                 break
 
-        # Plan agent gets its own identity only — no main session system
-        # prompt or conversation history. It's an autonomous sub-agent.
+        # Plan agent gets template guardrails + its own identity — no tool
+        # patterns, MCP resources, or general conversation history (only
+        # prior plan tool_call/result pairs are forwarded for refinement).
         agent_messages: list[dict[str, Any]] = [
-            {"role": "system", "content": self._PLAN_IDENTITY},
+            {"role": "system", "content": self._plan_system_content()},
         ]
         agent_messages.extend(prior_plan_msgs)
         agent_messages.append({"role": "user", "content": prompt})
@@ -3700,7 +3711,7 @@ class ChatSession:
         """Re-run the plan agent incorporating user feedback."""
         tc_id = f"plan_refine_{uuid.uuid4().hex[:8]}"
         agent_messages: list[dict[str, Any]] = [
-            {"role": "system", "content": self._PLAN_IDENTITY},
+            {"role": "system", "content": self._plan_system_content()},
             {
                 "role": "assistant",
                 "content": None,
