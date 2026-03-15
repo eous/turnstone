@@ -206,6 +206,19 @@ var CALLOUT_TYPES = {
 };
 
 // ---------------------------------------------------------------------------
+//  Code fence language → CSS class normalization
+// ---------------------------------------------------------------------------
+var _LANG_ALIASES = { "c++": "cpp", "c#": "csharp", "f#": "fsharp" };
+
+function _langToCssClass(lang) {
+  if (!lang) return "";
+  var lower = lang.toLowerCase();
+  if (_LANG_ALIASES[lower]) return _LANG_ALIASES[lower];
+  // Strip chars invalid in CSS class names (keep alphanumeric + hyphen)
+  return lower.replace(/[^a-z0-9-]/g, "");
+}
+
+// ---------------------------------------------------------------------------
 //  Main markdown renderer
 // ---------------------------------------------------------------------------
 function renderMarkdown(text) {
@@ -279,11 +292,12 @@ function renderMarkdown(text) {
 
   // Protect code blocks
   var codeBlocks = [];
-  text = text.replace(/```(\w*)\n([\s\S]*?)```/g, function (m, lang, code) {
+  text = text.replace(/```([^\s`]*)\n([\s\S]*?)```/g, function (m, lang, code) {
+    var cssLang = _langToCssClass(lang);
     codeBlocks.push(
-      '<pre><code class="language-' +
-        escapeHtml(lang) +
-        '">' +
+      "<pre><code" +
+        (cssLang ? ' class="language-' + escapeHtml(cssLang) + '"' : "") +
+        ">" +
         escapeHtml(code.replace(/\n$/, "")) +
         "</code></pre>",
     );
