@@ -977,8 +977,10 @@ class MCPClientManager:
                 self._sessions.pop(name, None)
                 stack = self._per_server_stacks.pop(name, None)
                 if stack is not None:
-                    with contextlib.suppress(Exception):
-                        await stack.aclose()
+                    try:
+                        await asyncio.wait_for(stack.aclose(), timeout=10)
+                    except (TimeoutError, Exception):
+                        log.warning("Timed out closing MCP server '%s', forcing cleanup", name)
                 # Clean up per-server state (on the event loop thread)
                 self._per_server_tools.pop(name, None)
                 self._per_server_resources.pop(name, None)
