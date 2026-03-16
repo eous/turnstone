@@ -31,7 +31,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.drop_index("idx_mcp_servers_registry_name")
+    op.drop_index("idx_mcp_servers_registry_name", table_name="mcp_servers")
     op.drop_column("mcp_servers", "registry_meta")
     op.drop_column("mcp_servers", "registry_version")
     op.drop_column("mcp_servers", "registry_name")

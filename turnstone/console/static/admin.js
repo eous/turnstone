@@ -3826,6 +3826,8 @@ function _doRegistryInstall(
         errEl.style.display = "";
       } else {
         showToast("Install failed: " + e.message);
+        // Re-render to reset card button states
+        _renderRegistryResults();
       }
     })
     .finally(function () {

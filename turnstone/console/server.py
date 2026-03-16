@@ -3190,8 +3190,8 @@ async def admin_registry_search(request: Request) -> JSONResponse:
         except MCPRegistryError as exc:
             return JSONResponse({"error": f"Registry error: {exc}"}, status_code=502)
 
-    # Deduplicate: keep only isLatest entries, then by name (highest version)
-    # Skip servers with no install source (no remotes and no packages)
+    # Deduplicate: keep only isLatest entries, first occurrence per name wins.
+    # Skip servers with no install source (no remotes and no packages).
     seen: dict[str, RegistryServer] = {}
     for srv in result.servers:
         if srv.meta and not srv.meta.is_latest:
