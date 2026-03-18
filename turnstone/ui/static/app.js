@@ -592,10 +592,31 @@ function connectContentSSE(wsId) {
           showLogin();
           return;
         }
-        setTimeout(function () {
-          connectContentSSE(currentWsId);
-        }, contentRetryDelay);
-        contentRetryDelay = Math.min(contentRetryDelay * 2, 30000);
+        return r.json().then(function (data) {
+          // Replace workstream list — IDs may have changed after restart
+          var freshIds = {};
+          workstreams = {};
+          (data.workstreams || []).forEach(function (ws) {
+            workstreams[ws.id] = { name: ws.name, state: ws.state };
+            freshIds[ws.id] = true;
+          });
+          // Always re-render tabs since workstreams map was replaced
+          renderTabBar();
+          // If current ws_id is stale, switch to first available
+          if (currentWsId && !freshIds[currentWsId]) {
+            var ids = Object.keys(freshIds);
+            if (ids.length) {
+              switchTab(ids[0]);
+            } else {
+              showDashboard();
+            }
+            return; // switchTab/showDashboard handles SSE connection
+          }
+          setTimeout(function () {
+            connectContentSSE(currentWsId);
+          }, contentRetryDelay);
+          contentRetryDelay = Math.min(contentRetryDelay * 2, 30000);
+        });
       })
       .catch(function () {
         setTimeout(function () {
