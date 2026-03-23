@@ -20,8 +20,6 @@ import time
 from collections import Counter
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from turnstone.mq.bridge import Bridge
 
 ITERATIONS = 100
@@ -48,12 +46,16 @@ def _approval_items(tool_name: str = "bash") -> list[dict]:
     return [{"func_name": tool_name, "needs_approval": True, "approval_label": tool_name}]
 
 
-def _wait_pending_clear(bridge: Bridge, key: str, attr: str, deadline_s: float = 3.0) -> bool:
-    """Poll until the pending entry is cleared or deadline expires."""
+def _wait_pending_resolved(bridge: Bridge, key: str, attr: str, deadline_s: float = 3.0) -> bool:
+    """Poll until the pending entry is resolved (tombstone) or absent."""
     deadline = time.monotonic() + deadline_s
     while time.monotonic() < deadline:
         with bridge._lock:
-            if key not in getattr(bridge, attr):
+            entries = getattr(bridge, attr)
+            if key not in entries:
+                return True
+            _, resolved_at = entries[key]
+            if resolved_at > 0:
                 return True
         time.sleep(0.01)
     return False
@@ -68,12 +70,6 @@ class TestDuplicateApproval:
     """Two threads call _handle_approval for the same ws_id simultaneously.
     Only one should create a pending entry; the other should be skipped."""
 
-    @pytest.mark.xfail(
-        reason="Known race: _wait_approval pops _pending_approvals in finally, "
-        "allowing a concurrent SSE reconnect to slip past the duplicate guard. "
-        "Fix: keep the pending entry until the workstream returns to idle.",
-        strict=False,
-    )
     def test_no_duplicate_approvals(self):
         sent_count = Counter()
 
@@ -99,8 +95,8 @@ class TestDuplicateApproval:
                 assert not t1.is_alive(), "Thread 1 hung"
                 assert not t2.is_alive(), "Thread 2 hung"
 
-                # Wait for spawned _wait_approval threads to finish
-                _wait_pending_clear(bridge, "ws-1", "_pending_approvals")
+                # Wait for spawned _wait_approval threads to resolve
+                _wait_pending_resolved(bridge, "ws-1", "_pending_approvals")
 
                 sent_count[mock_approve.call_count] += 1
 
@@ -119,13 +115,6 @@ class TestDuplicatePlanReview:
     """Two threads call _handle_plan_review simultaneously.
     Only one should create a pending entry."""
 
-    @pytest.mark.xfail(
-        reason="Known race: _wait_plan pops _pending_plan_reviews before posting "
-        "(intentionally, for the refinement loop), but a re-injected SSE event "
-        "during this window creates a second pending entry. "
-        "Fix: use a generation counter instead of presence check.",
-        strict=False,
-    )
     def test_no_duplicate_plan_reviews(self):
         sent_count = Counter()
 
@@ -150,8 +139,8 @@ class TestDuplicatePlanReview:
                 assert not t1.is_alive(), "Thread 1 hung"
                 assert not t2.is_alive(), "Thread 2 hung"
 
-                # Wait for spawned _wait_plan threads to finish
-                _wait_pending_clear(bridge, "ws-1", "_pending_plan_reviews")
+                # Wait for spawned _wait_plan threads to resolve
+                _wait_pending_resolved(bridge, "ws-1", "_pending_plan_reviews")
 
                 sent_count[bridge._http.post.call_count] += 1
 
@@ -263,9 +252,9 @@ class TestApprovalThreadTimeout:
             with patch.object(bridge, "_publish_ws"), patch.object(bridge, "_api_approve"):
                 bridge._handle_approval("ws-1", {"items": _approval_items()})
 
-            # The pending entry should be cleaned up within the timeout
-            cleared = _wait_pending_clear(bridge, "ws-1", "_pending_approvals", deadline_s=3.0)
-            assert cleared, "Approval thread did not exit within expected timeout"
+            # The pending entry should be resolved within the timeout
+            resolved = _wait_pending_resolved(bridge, "ws-1", "_pending_approvals", deadline_s=3.0)
+            assert resolved, "Approval thread did not exit within expected timeout"
 
 
 # ---------------------------------------------------------------------------
@@ -291,10 +280,11 @@ class TestApprovalDuringClose:
 
             def _close_ws(bridge=bridge, barrier=barrier):
                 barrier.wait()
-                with bridge._lock:
-                    bridge._ws_threads.pop("ws-1", None)
-                    bridge._ws_auto_approve.pop("ws-1", None)
-                    bridge._ws_approve_tools.pop("ws-1", None)
+                with (
+                    patch.object(bridge, "_publish_global"),
+                    patch.object(bridge, "_publish_cluster"),
+                ):
+                    bridge._handle_global_event({"type": "ws_closed", "ws_id": "ws-1"})
 
             t1 = threading.Thread(target=_send_approval)
             t2 = threading.Thread(target=_close_ws)
@@ -305,6 +295,57 @@ class TestApprovalDuringClose:
             assert not t1.is_alive(), "Approval thread hung"
             assert not t2.is_alive(), "Close thread hung"
 
-            # Wait for spawned _wait_approval thread to finish
-            cleared = _wait_pending_clear(bridge, "ws-1", "_pending_approvals")
-            assert cleared, "Orphaned pending approval"
+            # Wait for spawned _wait_approval thread to resolve (if close
+            # didn't remove the entry first)
+            resolved = _wait_pending_resolved(bridge, "ws-1", "_pending_approvals")
+            assert resolved, "Orphaned pending approval"
+
+
+# ---------------------------------------------------------------------------
+# Race 7: Plan review refinement loop (tombstone → cleanup → re-entry)
+# ---------------------------------------------------------------------------
+
+
+class TestPlanReviewRefinementLoop:
+    """After a plan review is resolved, a ws_state event should clean up the
+    tombstone so the refinement-loop plan_review event is handled correctly."""
+
+    def test_refinement_loop_allows_reentry(self):
+        for _ in range(ITERATIONS):
+            bridge = _make_bridge()
+            bridge._broker.pop_response.return_value = (
+                '{"type": "plan_feedback", "feedback": "refine this"}'
+            )
+
+            # Step 1: first plan review — creates pending entry, resolves it
+            with patch.object(bridge, "_publish_ws"), patch.object(bridge._http, "post"):
+                bridge._handle_plan_review("ws-1", {"content": "plan v1"})
+
+            _wait_pending_resolved(bridge, "ws-1", "_pending_plan_reviews")
+
+            # Verify tombstone is present (resolved_at > 0)
+            with bridge._lock:
+                assert "ws-1" in bridge._pending_plan_reviews
+                assert bridge._pending_plan_reviews["ws-1"][1] > 0
+
+            # Step 2: ws_state event cleans up the resolved tombstone
+            with (
+                patch.object(bridge, "_publish_ws"),
+                patch.object(bridge, "_publish_global"),
+                patch.object(bridge, "_publish_cluster"),
+            ):
+                bridge._handle_global_event(
+                    {"type": "ws_state", "ws_id": "ws-1", "state": "working"}
+                )
+
+            with bridge._lock:
+                assert "ws-1" not in bridge._pending_plan_reviews
+
+            # Step 3: refinement plan_review arrives — should create new entry
+            with patch.object(bridge, "_publish_ws"), patch.object(bridge._http, "post"):
+                bridge._handle_plan_review("ws-1", {"content": "plan v2"})
+
+            _wait_pending_resolved(bridge, "ws-1", "_pending_plan_reviews")
+
+            with bridge._lock:
+                assert "ws-1" in bridge._pending_plan_reviews
