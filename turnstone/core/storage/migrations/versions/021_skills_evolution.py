@@ -27,56 +27,32 @@ depends_on = None
 
 
 def upgrade() -> None:
-    # Phase 1: Skills evolution columns
-    op.add_column(
-        "prompt_templates",
-        sa.Column("description", sa.Text, nullable=False, server_default=""),
-    )
-    op.add_column(
-        "prompt_templates",
-        sa.Column("tags", sa.Text, nullable=False, server_default="[]"),
-    )
-    op.add_column(
-        "prompt_templates",
-        sa.Column("source_url", sa.Text, nullable=False, server_default=""),
-    )
-    op.add_column(
-        "prompt_templates",
-        sa.Column("version", sa.Text, nullable=False, server_default="1.0.0"),
-    )
-    op.add_column(
-        "prompt_templates",
-        sa.Column("author", sa.Text, nullable=False, server_default=""),
-    )
-    op.add_column(
-        "prompt_templates",
-        sa.Column("activation", sa.Text, nullable=False, server_default="named"),
-    )
-    op.add_column(
-        "prompt_templates",
-        sa.Column("token_estimate", sa.Integer, nullable=False, server_default="0"),
-    )
-    # Phase 2: Security scanning + install provenance
-    op.add_column(
-        "prompt_templates",
-        sa.Column("allowed_tools", sa.Text, nullable=False, server_default="[]"),
-    )
-    op.add_column(
-        "prompt_templates",
-        sa.Column("scan_status", sa.Text, nullable=False, server_default=""),
-    )
-    op.add_column(
-        "prompt_templates",
-        sa.Column("scan_report", sa.Text, nullable=False, server_default="{}"),
-    )
-    op.add_column(
-        "prompt_templates",
-        sa.Column("installed_at", sa.Text, nullable=False, server_default=""),
-    )
-    op.add_column(
-        "prompt_templates",
-        sa.Column("installed_by", sa.Text, nullable=False, server_default=""),
-    )
+    # Phase 1+2: Skills evolution columns + security scanning (batch for SQLite)
+    with op.batch_alter_table("prompt_templates") as batch_op:
+        batch_op.add_column(sa.Column("description", sa.Text, nullable=False, server_default=""))
+        batch_op.add_column(sa.Column("tags", sa.Text, nullable=False, server_default="[]"))
+        batch_op.add_column(sa.Column("source_url", sa.Text, nullable=False, server_default=""))
+        batch_op.add_column(sa.Column("version", sa.Text, nullable=False, server_default="1.0.0"))
+        batch_op.add_column(sa.Column("author", sa.Text, nullable=False, server_default=""))
+        batch_op.add_column(
+            sa.Column("activation", sa.Text, nullable=False, server_default="named"),
+        )
+        batch_op.add_column(
+            sa.Column("token_estimate", sa.Integer, nullable=False, server_default="0"),
+        )
+        batch_op.add_column(
+            sa.Column("allowed_tools", sa.Text, nullable=False, server_default="[]"),
+        )
+        batch_op.add_column(sa.Column("scan_status", sa.Text, nullable=False, server_default=""))
+        batch_op.add_column(
+            sa.Column("scan_report", sa.Text, nullable=False, server_default="{}"),
+        )
+        batch_op.add_column(
+            sa.Column("installed_at", sa.Text, nullable=False, server_default=""),
+        )
+        batch_op.add_column(
+            sa.Column("installed_by", sa.Text, nullable=False, server_default=""),
+        )
 
     # Backfill activation from is_default
     op.execute("UPDATE prompt_templates SET activation = 'default' WHERE is_default = 1")
@@ -101,42 +77,26 @@ def upgrade() -> None:
     )
 
     # Phase 3: Session config columns (from workstream templates)
-    op.add_column(
-        "prompt_templates",
-        sa.Column("model", sa.Text, nullable=False, server_default=""),
-    )
-    op.add_column(
-        "prompt_templates",
-        sa.Column("auto_approve", sa.Integer, nullable=False, server_default="0"),
-    )
-    op.add_column(
-        "prompt_templates",
-        sa.Column("temperature", sa.Float, nullable=True),
-    )
-    op.add_column(
-        "prompt_templates",
-        sa.Column("reasoning_effort", sa.Text, nullable=False, server_default=""),
-    )
-    op.add_column(
-        "prompt_templates",
-        sa.Column("max_tokens", sa.Integer, nullable=True),
-    )
-    op.add_column(
-        "prompt_templates",
-        sa.Column("token_budget", sa.Integer, nullable=False, server_default="0"),
-    )
-    op.add_column(
-        "prompt_templates",
-        sa.Column("agent_max_turns", sa.Integer, nullable=True),
-    )
-    op.add_column(
-        "prompt_templates",
-        sa.Column("notify_on_complete", sa.Text, nullable=False, server_default="{}"),
-    )
-    op.add_column(
-        "prompt_templates",
-        sa.Column("enabled", sa.Integer, nullable=False, server_default="1"),
-    )
+    with op.batch_alter_table("prompt_templates") as batch_op:
+        batch_op.add_column(sa.Column("model", sa.Text, nullable=False, server_default=""))
+        batch_op.add_column(
+            sa.Column("auto_approve", sa.Integer, nullable=False, server_default="0"),
+        )
+        batch_op.add_column(sa.Column("temperature", sa.Float, nullable=True))
+        batch_op.add_column(
+            sa.Column("reasoning_effort", sa.Text, nullable=False, server_default=""),
+        )
+        batch_op.add_column(sa.Column("max_tokens", sa.Integer, nullable=True))
+        batch_op.add_column(
+            sa.Column("token_budget", sa.Integer, nullable=False, server_default="0"),
+        )
+        batch_op.add_column(sa.Column("agent_max_turns", sa.Integer, nullable=True))
+        batch_op.add_column(
+            sa.Column("notify_on_complete", sa.Text, nullable=False, server_default="{}"),
+        )
+        batch_op.add_column(
+            sa.Column("enabled", sa.Integer, nullable=False, server_default="1"),
+        )
 
     # Skill versions — version history for skills
     op.create_table(
@@ -253,24 +213,25 @@ def upgrade() -> None:
 
     # Rename workstreams table columns: ws_template_id → skill_id,
     # ws_template_version → skill_version
-    op.alter_column("workstreams", "ws_template_id", new_column_name="skill_id")
-    op.alter_column("workstreams", "ws_template_version", new_column_name="skill_version")
+    with op.batch_alter_table("workstreams") as batch_op:
+        batch_op.alter_column("ws_template_id", new_column_name="skill_id")
+        batch_op.alter_column("ws_template_version", new_column_name="skill_version")
 
-    # Rename scheduled_tasks.template → skill
-    op.alter_column("scheduled_tasks", "template", new_column_name="skill")
+    # Rename scheduled_tasks.template → skill, drop ws_template
+    with op.batch_alter_table("scheduled_tasks") as batch_op:
+        batch_op.alter_column("template", new_column_name="skill")
+        batch_op.drop_column("ws_template")
 
     # Drop old tables
     op.drop_table("workstream_template_versions")
     op.drop_table("workstream_templates")
 
-    # Drop ws_template column from scheduled_tasks
-    op.drop_column("scheduled_tasks", "ws_template")
-
 
 def downgrade() -> None:
     # Reverse workstreams column renames
-    op.alter_column("workstreams", "skill_id", new_column_name="ws_template_id")
-    op.alter_column("workstreams", "skill_version", new_column_name="ws_template_version")
+    with op.batch_alter_table("workstreams") as batch_op:
+        batch_op.alter_column("skill_id", new_column_name="ws_template_id")
+        batch_op.alter_column("skill_version", new_column_name="ws_template_version")
 
     # Reverse workstream_config key renames
     op.execute("UPDATE workstream_config SET key = 'ws_template_id' WHERE key = 'applied_skill_id'")
@@ -283,14 +244,10 @@ def downgrade() -> None:
         "WHERE key = 'applied_skill_content'"
     )
 
-    # Reverse scheduled_tasks column rename: skill → template
-    op.alter_column("scheduled_tasks", "skill", new_column_name="template")
-
-    # Re-add ws_template column to scheduled_tasks
-    op.add_column(
-        "scheduled_tasks",
-        sa.Column("ws_template", sa.Text, nullable=False, server_default=""),
-    )
+    # Reverse scheduled_tasks column rename + re-add ws_template
+    with op.batch_alter_table("scheduled_tasks") as batch_op:
+        batch_op.alter_column("skill", new_column_name="template")
+        batch_op.add_column(sa.Column("ws_template", sa.Text, nullable=False, server_default=""))
 
     # Recreate workstream_templates (empty — destructive migration)
     op.create_table(
@@ -333,32 +290,31 @@ def downgrade() -> None:
     op.drop_index("idx_skill_versions_skill_id", table_name="skill_versions")
     op.drop_table("skill_versions")
 
-    # Drop session config columns from prompt_templates
-    op.drop_column("prompt_templates", "enabled")
-    op.drop_column("prompt_templates", "notify_on_complete")
-    op.drop_column("prompt_templates", "agent_max_turns")
-    op.drop_column("prompt_templates", "token_budget")
-    op.drop_column("prompt_templates", "max_tokens")
-    op.drop_column("prompt_templates", "reasoning_effort")
-    op.drop_column("prompt_templates", "temperature")
-    op.drop_column("prompt_templates", "auto_approve")
-    op.drop_column("prompt_templates", "model")
+    # Drop session config + skills evolution columns from prompt_templates
+    with op.batch_alter_table("prompt_templates") as batch_op:
+        batch_op.drop_column("enabled")
+        batch_op.drop_column("notify_on_complete")
+        batch_op.drop_column("agent_max_turns")
+        batch_op.drop_column("token_budget")
+        batch_op.drop_column("max_tokens")
+        batch_op.drop_column("reasoning_effort")
+        batch_op.drop_column("temperature")
+        batch_op.drop_column("auto_approve")
+        batch_op.drop_column("model")
+        batch_op.drop_column("installed_by")
+        batch_op.drop_column("installed_at")
+        batch_op.drop_column("scan_report")
+        batch_op.drop_column("scan_status")
+        batch_op.drop_column("allowed_tools")
+        batch_op.drop_column("token_estimate")
+        batch_op.drop_column("activation")
+        batch_op.drop_column("author")
+        batch_op.drop_column("version")
+        batch_op.drop_column("source_url")
+        batch_op.drop_column("tags")
+        batch_op.drop_column("description")
 
     # Drop skill resources
     op.drop_index("idx_skill_resources_skill_path", table_name="skill_resources")
     op.drop_index("idx_skill_resources_skill_id", table_name="skill_resources")
     op.drop_table("skill_resources")
-
-    # Drop skills evolution columns
-    op.drop_column("prompt_templates", "installed_by")
-    op.drop_column("prompt_templates", "installed_at")
-    op.drop_column("prompt_templates", "scan_report")
-    op.drop_column("prompt_templates", "scan_status")
-    op.drop_column("prompt_templates", "allowed_tools")
-    op.drop_column("prompt_templates", "token_estimate")
-    op.drop_column("prompt_templates", "activation")
-    op.drop_column("prompt_templates", "author")
-    op.drop_column("prompt_templates", "version")
-    op.drop_column("prompt_templates", "source_url")
-    op.drop_column("prompt_templates", "tags")
-    op.drop_column("prompt_templates", "description")

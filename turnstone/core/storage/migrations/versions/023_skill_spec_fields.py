@@ -19,16 +19,14 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column(
-        "prompt_templates",
-        sa.Column("license", sa.Text, nullable=False, server_default=""),
-    )
-    op.add_column(
-        "prompt_templates",
-        sa.Column("compatibility", sa.Text, nullable=False, server_default=""),
-    )
+    with op.batch_alter_table("prompt_templates") as batch_op:
+        batch_op.add_column(sa.Column("license", sa.Text, nullable=False, server_default=""))
+        batch_op.add_column(
+            sa.Column("compatibility", sa.Text, nullable=False, server_default=""),
+        )
 
 
 def downgrade() -> None:
-    op.drop_column("prompt_templates", "compatibility")
-    op.drop_column("prompt_templates", "license")
+    with op.batch_alter_table("prompt_templates") as batch_op:
+        batch_op.drop_column("compatibility")
+        batch_op.drop_column("license")

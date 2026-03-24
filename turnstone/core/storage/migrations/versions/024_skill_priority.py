@@ -19,11 +19,10 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column(
-        "prompt_templates",
-        sa.Column("priority", sa.Integer, nullable=False, server_default="0"),
-    )
+    with op.batch_alter_table("prompt_templates") as batch_op:
+        batch_op.add_column(sa.Column("priority", sa.Integer, nullable=False, server_default="0"))
 
 
 def downgrade() -> None:
-    op.drop_column("prompt_templates", "priority")
+    with op.batch_alter_table("prompt_templates") as batch_op:
+        batch_op.drop_column("priority")

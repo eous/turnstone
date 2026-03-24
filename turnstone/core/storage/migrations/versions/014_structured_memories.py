@@ -28,9 +28,7 @@ def upgrade() -> None:
         sa.Column("updated", sa.Text, nullable=False),
         sa.Column("last_accessed", sa.Text, nullable=False, server_default=""),
         sa.Column("access_count", sa.Integer, nullable=False, server_default="0"),
-    )
-    op.create_unique_constraint(
-        "uq_smem_name_scope", "structured_memories", ["name", "scope", "scope_id"]
+        sa.UniqueConstraint("name", "scope", "scope_id", name="uq_smem_name_scope"),
     )
     op.create_index("idx_smem_type", "structured_memories", ["type"])
     op.create_index("idx_smem_scope", "structured_memories", ["scope", "scope_id"])

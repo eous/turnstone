@@ -33,14 +33,13 @@ def upgrade() -> None:
     op.create_index("ix_oa_created", "output_assessments", ["created"])
     op.create_index("ix_oa_risk", "output_assessments", ["risk_level"])
 
-    op.add_column(
-        "prompt_templates",
-        sa.Column("scan_version", sa.Text, nullable=False, server_default=""),
-    )
+    with op.batch_alter_table("prompt_templates") as batch_op:
+        batch_op.add_column(sa.Column("scan_version", sa.Text, nullable=False, server_default=""))
 
 
 def downgrade() -> None:
-    op.drop_column("prompt_templates", "scan_version")
+    with op.batch_alter_table("prompt_templates") as batch_op:
+        batch_op.drop_column("scan_version")
     op.drop_index("ix_oa_risk", table_name="output_assessments")
     op.drop_index("ix_oa_created", table_name="output_assessments")
     op.drop_index("ix_oa_ws_id", table_name="output_assessments")
