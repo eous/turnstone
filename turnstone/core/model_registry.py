@@ -34,6 +34,7 @@ class ModelConfig:
     context_window: int = 32768
     provider: str = "openai"
     capabilities: dict[str, Any] = field(default_factory=dict)
+    source: str = ""  # "config", "db", or "" (CLI default)
 
 
 # ---------------------------------------------------------------------------
@@ -81,9 +82,9 @@ class ModelRegistry:
 
     def get_client(self, alias: str) -> Any:
         """Get or lazily create an API client for *alias*. Thread-safe."""
-        if alias not in self._models:
-            raise ValueError(f"Unknown model alias: {alias}")
         with self._client_lock:
+            if alias not in self._models:
+                raise ValueError(f"Unknown model alias: {alias}")
             if alias not in self._clients:
                 cfg = self._models[alias]
                 self._clients[alias] = create_client(
@@ -93,9 +94,9 @@ class ModelRegistry:
 
     def get_provider(self, alias: str) -> LLMProvider:
         """Get the ``LLMProvider`` for *alias*. Thread-safe, cached."""
-        if alias not in self._models:
-            raise ValueError(f"Unknown model alias: {alias}")
         with self._client_lock:
+            if alias not in self._models:
+                raise ValueError(f"Unknown model alias: {alias}")
             if alias not in self._providers:
                 cfg = self._models[alias]
                 self._providers[alias] = create_provider(cfg.provider)
@@ -129,7 +130,45 @@ class ModelRegistry:
         """Number of registered models."""
         return len(self._models)
 
+    @property
+    def models(self) -> dict[str, ModelConfig]:
+        """Return a copy of the models dict (public accessor for reload)."""
+        return dict(self._models)
+
     # -- lifecycle -----------------------------------------------------------
+
+    def reload(
+        self,
+        models: dict[str, ModelConfig],
+        default: str,
+        fallback: list[str] | None = None,
+        agent_model: str | None = None,
+    ) -> None:
+        """Hot-reload all model configs. Thread-safe; clears cached clients.
+
+        Validates arguments before mutating state so a bad reload
+        does not leave the registry in an inconsistent state.
+        """
+        if not models:
+            raise ValueError("ModelRegistry requires at least one model config")
+        if default not in models:
+            raise ValueError(f"Default model '{default}' not found in registry")
+        if fallback:
+            for alias in fallback:
+                if alias not in models:
+                    raise ValueError(f"Fallback model '{alias}' not found in registry")
+        if agent_model and agent_model not in models:
+            raise ValueError(f"Agent model '{agent_model}' not found in registry")
+        with self._client_lock:
+            self._models = dict(models)
+            self.default = default
+            self.fallback = list(fallback) if fallback else []
+            self.agent_model = agent_model
+            for client in self._clients.values():
+                if hasattr(client, "close"):
+                    client.close()
+            self._clients.clear()
+            self._providers.clear()
 
     def shutdown(self) -> None:
         """Close all cached client connections."""
@@ -146,32 +185,82 @@ class ModelRegistry:
 # ---------------------------------------------------------------------------
 
 
+def _resolve_env_vars(value: str) -> str:
+    """Expand ``${VAR}`` patterns in *value* using environment variables.
+
+    Unresolved variables are replaced with empty strings.
+    """
+    import os
+    import re
+
+    def _replace(m: re.Match[str]) -> str:
+        return os.environ.get(m.group(1), "")
+
+    return re.sub(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}", _replace, value)
+
+
 def load_model_registry(
     base_url: str,
     api_key: str,
     model: str,
     context_window: int = 32768,
     provider: str = "openai",
+    storage: Any | None = None,
 ) -> ModelRegistry:
-    """Build a ModelRegistry from CLI args and ``config.toml``.
+    """Build a ModelRegistry from CLI args, ``config.toml``, and database.
 
-    Precedence:
+    Precedence (highest to lowest):
 
-    1. ``[models.*]`` sections in config.toml define named models.
-    2. CLI ``--base-url`` / ``--api-key`` / ``--model`` always create a
-       ``"default"`` entry (overrides any ``[models.default]`` section).
-    3. ``[model].default``, ``[model].fallback``, ``[model].agent_model``
+    1. ``[models.*]`` sections in config.toml define named models
+       (``source="config"``).  These override DB entries with the same
+       alias in-memory only — the DB rows are never modified.
+    2. Database model definitions (``source="db"``), loaded when
+       *storage* is provided.
+    3. CLI ``--base-url`` / ``--api-key`` / ``--model`` always create a
+       ``"default"`` entry.
+    4. ``[model].default``, ``[model].fallback``, ``[model].agent_model``
        control routing.
-    4. If no ``[models.*]`` sections exist, a single-entry registry is built
-       from the CLI args.
     """
+    import json as _json
+
     cfg = load_config()
     models_section: dict[str, Any] = cfg.get("models", {})
     model_section: dict[str, Any] = cfg.get("model", {})
 
     configs: dict[str, ModelConfig] = {}
 
-    # Build configs from [models.*] sections
+    # 1. Load DB model definitions (lowest priority, overridden by config.toml)
+    if storage is not None:
+        try:
+            for row in storage.list_model_definitions(enabled_only=True):
+                alias = row["alias"]
+                caps: dict[str, Any] = {}
+                if row.get("capabilities"):
+                    try:
+                        parsed = _json.loads(row["capabilities"])
+                        if isinstance(parsed, dict):
+                            caps = parsed
+                    except (_json.JSONDecodeError, TypeError):
+                        pass
+                row_provider = row.get("provider", "openai")
+                row_model = row["model"]
+                # 0 = auto-detect: inherit CLI-detected context_window,
+                # same fallback chain as config.toml models
+                row_ctx = row.get("context_window", 0) or context_window
+                configs[alias] = ModelConfig(
+                    alias=alias,
+                    base_url=_resolve_env_vars(row.get("base_url", "")),
+                    api_key=_resolve_env_vars(row.get("api_key", "")),
+                    model=row_model,
+                    context_window=row_ctx,
+                    provider=row_provider,
+                    capabilities=caps,
+                    source="db",
+                )
+        except Exception:
+            log.warning("Failed to load model definitions from storage", exc_info=True)
+
+    # 2. Build configs from [models.*] sections (overrides DB for same alias)
     for alias, entry in models_section.items():
         if not isinstance(entry, dict):
             continue
@@ -189,17 +278,20 @@ def load_model_registry(
             capabilities=entry.get("capabilities", {})
             if isinstance(entry.get("capabilities"), dict)
             else {},
+            source="config",
         )
 
-    # Ensure a "default" entry from CLI args
-    configs["default"] = ModelConfig(
-        alias="default",
-        base_url=base_url,
-        api_key=api_key,
-        model=model,
-        context_window=context_window,
-        provider=provider,
-    )
+    # 3. Ensure a "default" entry from CLI args (only if not already defined
+    # by config.toml or DB — those take precedence)
+    if "default" not in configs:
+        configs["default"] = ModelConfig(
+            alias="default",
+            base_url=base_url,
+            api_key=api_key,
+            model=model,
+            context_window=context_window,
+            provider=provider,
+        )
 
     # Determine default alias
     default_alias = model_section.get("default", "default")
