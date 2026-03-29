@@ -20,6 +20,7 @@ from turnstone.api.schemas import (
 )
 from turnstone.api.server_schemas import (
     ApproveRequest,
+    AvailableModelInfo,
     CancelRequest,
     CloseWorkstreamRequest,
     CommandRequest,
@@ -27,6 +28,7 @@ from turnstone.api.server_schemas import (
     CreateWorkstreamResponse,
     DashboardResponse,
     HealthResponse,
+    ListAvailableModelsResponse,
     ListMemoriesResponse,
     ListSavedWorkstreamsResponse,
     ListSkillSummaryResponse,
@@ -154,6 +156,14 @@ SERVER_ENDPOINTS: list[EndpointSpec] = [
         "List available skills (summary)",
         response_model=ListSkillSummaryResponse,
         tags=["Skills"],
+    ),
+    # --- Models ---
+    EndpointSpec(
+        "/v1/api/models",
+        "GET",
+        "List available model aliases",
+        response_model=ListAvailableModelsResponse,
+        tags=["Models"],
     ),
     # --- Auth ---
     EndpointSpec(
@@ -293,6 +303,8 @@ _ALL_MODELS: list[type[BaseModel]] = [
     SearchMemoriesRequest,
     SkillSummary,
     ListSkillSummaryResponse,
+    AvailableModelInfo,
+    ListAvailableModelsResponse,
 ]
 
 
