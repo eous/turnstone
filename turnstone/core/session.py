@@ -4285,6 +4285,21 @@ class ChatSession:
                     "-m",
                     "200",  # max matches per file
                     "--color=never",  # no ANSI codes in output
+                    # Skip common build/vendor/VCS directories
+                    "--exclude-dir=.git",
+                    "--exclude-dir=node_modules",
+                    "--exclude-dir=target",
+                    "--exclude-dir=__pycache__",
+                    "--exclude-dir=.mypy_cache",
+                    "--exclude-dir=.ruff_cache",
+                    "--exclude-dir=.pytest_cache",
+                    "--exclude-dir=dist",
+                    "--exclude-dir=build",
+                    "--exclude-dir=*.egg-info",
+                    "--exclude-dir=.tox",
+                    "--exclude-dir=.venv",
+                    "--exclude-dir=venv",
+                    "--exclude-dir=vendor",
                     "--",
                     pattern,
                     path,  # -- prevents pattern as flag
