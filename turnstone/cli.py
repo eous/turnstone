@@ -259,7 +259,10 @@ class TerminalUI(SessionUI):
         *,
         is_error: bool = False,
     ) -> None:
-        pass  # Optional: display summary
+        if is_error:
+            with self._print_lock:
+                sys.stderr.write(f"{RED}\u2717 {name}: {output}{RESET}\n")
+                sys.stderr.flush()
 
     def on_tool_output_chunk(self, call_id: str, chunk: str) -> None:
         pass  # Terminal shows spinner during tool execution
