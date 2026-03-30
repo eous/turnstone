@@ -102,6 +102,7 @@ class WebUI:
         self._ws_tool_calls: dict[str, int] = {}
         self._ws_tool_calls_reported: int = 0  # last cumulative total sent to usage
         self._ws_context_ratio: float = 0.0
+        self._ws_turn_tool_calls: int = 0
         # Activity tracking for dashboard (current tool / thinking / approval)
         self._ws_current_activity: str = ""
         self._ws_activity_state: str = ""  # "tool" | "approval" | "thinking" | ""
@@ -393,6 +394,7 @@ class WebUI:
         _metrics.record_tool_call(name)
         with self._ws_lock:
             self._ws_tool_calls[name] = self._ws_tool_calls.get(name, 0) + 1
+            self._ws_turn_tool_calls += 1
             self._ws_current_activity = ""
             self._ws_activity_state = ""
         self._broadcast_activity()
@@ -424,6 +426,8 @@ class WebUI:
             tool_total = sum(self._ws_tool_calls.values())
             tool_count = tool_total - self._ws_tool_calls_reported
             self._ws_tool_calls_reported = tool_total
+            turn_tool_calls = self._ws_turn_tool_calls
+            turn_count = self._ws_messages
         self._enqueue(
             {
                 "type": "status",
@@ -435,6 +439,8 @@ class WebUI:
                 "effort": effort,
                 "cache_creation_tokens": cache_creation,
                 "cache_read_tokens": cache_read,
+                "tool_calls_this_turn": turn_tool_calls,
+                "turn_count": turn_count,
             }
         )
         # Record usage event for governance dashboard
@@ -856,6 +862,32 @@ async def events_sse(request: Request) -> Response:
                 }
             )
         }
+        # Replay last status so the per-pane status bar populates on resume
+        if session._last_usage is not None:
+            u = session._last_usage
+            total_tok = u["prompt_tokens"] + u["completion_tokens"]
+            cw = session.context_window
+            pct = total_tok / cw * 100 if cw > 0 else 0
+            with ui._ws_lock:
+                turn_tool_calls = ui._ws_turn_tool_calls
+                turn_count = ui._ws_messages
+            yield {
+                "data": json.dumps(
+                    {
+                        "type": "status",
+                        "prompt_tokens": u["prompt_tokens"],
+                        "completion_tokens": u["completion_tokens"],
+                        "total_tokens": total_tok,
+                        "context_window": cw,
+                        "pct": round(pct, 1),
+                        "effort": session.reasoning_effort,
+                        "cache_creation_tokens": u.get("cache_creation_tokens", 0),
+                        "cache_read_tokens": u.get("cache_read_tokens", 0),
+                        "tool_calls_this_turn": turn_tool_calls,
+                        "turn_count": turn_count,
+                    }
+                )
+            }
         # History replay
         history = _build_history(session, has_pending_approval=ui._pending_approval is not None)
         if history:
@@ -1240,6 +1272,7 @@ async def send_message(request: Request) -> JSONResponse:
     _metrics.record_message_sent()
     with ui._ws_lock:
         ui._ws_messages += 1
+        ui._ws_turn_tool_calls = 0
     return JSONResponse({"status": "ok"})
 
 
