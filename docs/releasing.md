@@ -6,8 +6,8 @@ Turnstone uses two parallel release tracks published from a single PyPI package.
 
 | Track | Versions | Branch | Docker tags | PyPI install |
 |-------|----------|--------|-------------|--------------|
-| **Stable** | `1.0.0`, `1.0.1` | `stable/1.0` | `:1.0.1`, `:1.0`, `:stable`, `:latest` | `pip install turnstone` |
-| **Experimental** | `1.1.0a1`, `1.1.0a2` | `main` | `:1.1.0a1`, `:experimental` | `pip install turnstone --pre` |
+| **Stable** | `1.1.0`, `1.1.1` | `stable/1.1` | `:1.1.0`, `:1.1`, `:stable`, `:latest` | `pip install turnstone` |
+| **Experimental** | `1.2.0a1`, `1.2.0a2` | `main` | `:1.2.0a1`, `:experimental` | `pip install turnstone --pre` |
 
 - **Stable** receives bugfixes only. Production-grade.
 - **Experimental** receives new features. May be rough around the edges.
