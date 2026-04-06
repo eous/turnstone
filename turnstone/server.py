@@ -1735,8 +1735,10 @@ def _extract_last_assistant_content(session: Any) -> str:
 
 def _fire_notify_targets(ws: Any, content: str) -> None:
     """Send completion notifications to all configured targets."""
-    if not content or not ws.notify_targets:
+    if not ws.notify_targets:
         return
+    if not content:
+        content = "(Task completed — no output captured)"
 
     try:
         targets = json.loads(ws.notify_targets)
@@ -2032,7 +2034,7 @@ async def create_workstream(request: Request) -> JSONResponse:
             def _run_initial() -> None:
                 try:
                     session.send(initial_message)
-                except Exception:
+                except BaseException:
                     if isinstance(ws.ui, WebUI):
                         ws.ui.on_stream_end()
                         ws.ui.on_state_change("idle")

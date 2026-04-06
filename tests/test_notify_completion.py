@@ -349,11 +349,14 @@ class TestFireNotifyTargets:
         mock_deliver.assert_not_called()
 
     @patch("turnstone.server._deliver_notification")
-    def test_empty_content_skipped(self, mock_deliver):
+    def test_empty_content_delivers_fallback(self, mock_deliver):
+        """Empty content should still deliver with a fallback message."""
         ws = MagicMock()
         ws.notify_targets = '[{"channel_type":"discord","channel_id":"1"}]'
         _fire_notify_targets(ws, "")
-        mock_deliver.assert_not_called()
+        mock_deliver.assert_called_once()
+        payload = mock_deliver.call_args[0][1]
+        assert "no output captured" in payload["message"]
 
     @patch("turnstone.server._deliver_notification")
     def test_invalid_json_targets_skipped(self, mock_deliver):
