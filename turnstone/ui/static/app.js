@@ -1312,7 +1312,18 @@ Pane.prototype.updateVerdictBadge = function (verdict) {
   var badge = this.messagesEl.querySelector(
     '.verdict-badge[data-call-id="' + escapedId + '"]',
   );
-  if (!badge) return;
+  if (!badge) {
+    // Badge no longer in DOM (tool block replaced by output) — show
+    // a toast so the user still sees the late-arriving verdict.
+    var conf = Math.round((verdict.confidence || 0) * 100);
+    var rec = verdict.recommendation || "review";
+    var func = verdict.func_name || "";
+    showToast(
+      "Judge verdict for " + func + ": " + rec + " (" + conf + "%)",
+      rec === "approve" ? "success" : rec === "deny" ? "error" : "warning"
+    );
+    return;
+  }
 
   var risk = verdict.risk_level || "medium";
   badge.className = "verdict-badge verdict-" + risk;
@@ -1366,14 +1377,27 @@ Pane.prototype.updateVerdictGlow = function (recommendation) {
   if (!this.approvalBlockEl) return;
   var prompt = this.approvalBlockEl.querySelector(".approval-prompt");
   if (!prompt) return;
+
+  // Collect all verdict badges currently visible in this approval block
+  var badges = this.approvalBlockEl.querySelectorAll(".verdict-badge");
+  var worst = recommendation;
+  for (var i = 0; i < badges.length; i++) {
+    var recEl = badges[i].querySelector(".verdict-rec");
+    if (recEl) {
+      var r = recEl.textContent;
+      if (r === "deny") { worst = "deny"; break; }
+      if (r === "review" && worst !== "deny") worst = "review";
+    }
+  }
+
   prompt.classList.remove(
     "verdict-glow-approve",
     "verdict-glow-deny",
     "verdict-glow-review",
   );
-  if (recommendation === "approve")
+  if (worst === "approve")
     prompt.classList.add("verdict-glow-approve");
-  else if (recommendation === "deny") prompt.classList.add("verdict-glow-deny");
+  else if (worst === "deny") prompt.classList.add("verdict-glow-deny");
   else prompt.classList.add("verdict-glow-review");
 };
 
@@ -2222,6 +2246,13 @@ window.onThemeChange = function (next) {
     );
   }
   reRenderAllMermaid();
+  // Persist theme to server settings so it propagates to other clients
+  var themeValue = next === "light" ? "light" : "dark";
+  authFetch("/v1/api/admin/settings/interface.theme", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ value: themeValue }),
+  }).catch(function () {});
 };
 (function () {
   var btn = document.getElementById("theme-toggle");
@@ -2280,17 +2311,20 @@ function renderTabBar() {
     name.textContent = ws.name || wsId.substring(0, 6);
     tab.appendChild(name);
 
-    if (wsIds.length > 1) {
-      var close = document.createElement("button");
-      close.className = "tab-close";
-      close.innerHTML = "&times;";
-      close.title = "Close workstream";
-      close.onclick = function (e) {
-        e.stopPropagation();
-        closeWorkstream(wsId);
-      };
-      tab.appendChild(close);
-    }
+    var wsidBadge = document.createElement("span");
+    wsidBadge.className = "tab-wsid";
+    wsidBadge.textContent = wsId.substring(0, 7);
+    tab.appendChild(wsidBadge);
+
+    var close = document.createElement("button");
+    close.className = "tab-close";
+    close.innerHTML = "&times;";
+    close.title = "Close workstream";
+    close.onclick = function (e) {
+      e.stopPropagation();
+      closeWorkstream(wsId);
+    };
+    tab.appendChild(close);
 
     tabList.appendChild(tab);
   });
@@ -2350,6 +2384,11 @@ function switchTab(wsId) {
   if (!pane) return;
   if (wsId === pane.wsId && !dashboardVisible) return;
 
+  // Track last active for close_tab_action
+  if (pane.wsId && workstreams[pane.wsId]) {
+    _lastActiveWsId = pane.wsId;
+  }
+
   // In multi-pane mode, focus an existing pane showing this ws
   if (splitRoot && countLeaves(splitRoot) > 1) {
     for (var pid in panes) {
@@ -2370,6 +2409,8 @@ function switchTab(wsId) {
   pane.updateWsName();
   renderTabBar();
   pane.connectSSE(wsId);
+  updateWsActionButtons();
+  _applyTitleButtonState();
 
   if (!_historyNavigation) {
     history.pushState({ turnstone: "workstream", wsId: wsId }, "");
@@ -2381,15 +2422,39 @@ function switchTab(wsId) {
 // ===========================================================================
 
 var _newWsTrapHandler = null;
+var _forkFromWsId = "";
 
 function newWorkstream() {
   showNewWsModal();
 }
 
-function showNewWsModal() {
+function showNewWsModal(forkFromWsId) {
+  _forkFromWsId = forkFromWsId || "";
   var overlay = document.getElementById("new-ws-overlay");
   overlay.style.display = "flex";
   document.body.style.overflow = "hidden";
+
+  // Update title and button text based on mode
+  var titleEl = document.getElementById("new-ws-title");
+  var submitBtn = document.getElementById("new-ws-submit");
+  if (_forkFromWsId) {
+    titleEl.textContent = "Fork Workstream";
+    submitBtn.textContent = "Fork";
+  } else {
+    titleEl.textContent = "New Workstream";
+    submitBtn.textContent = "Create";
+  }
+
+  // Hide skill dropdown when forking (not relevant — fork copies history)
+  var skillLabel = document.querySelector('label[for="new-ws-skill"]');
+  var skillSelect = document.getElementById("new-ws-skill");
+  if (_forkFromWsId) {
+    if (skillLabel) skillLabel.style.display = "none";
+    if (skillSelect) skillSelect.style.display = "none";
+  } else {
+    if (skillLabel) skillLabel.style.display = "";
+    if (skillSelect) skillSelect.style.display = "";
+  }
 
   overlay.onclick = function (e) {
     if (e.target === overlay) hideNewWsModal();
@@ -2397,15 +2462,21 @@ function showNewWsModal() {
 
   // Populate model dropdown
   var modelSelect = document.getElementById("new-ws-model");
+  var judgeSelect = document.getElementById("new-ws-judge-model"); // NEW
   var fp = getFocusedPane();
   var curModel = fp ? fp.modelAlias || fp.model || "" : "";
   modelSelect.textContent = "";
+  judgeSelect.textContent = ""; // NEW
   var defaultOpt = document.createElement("option");
   defaultOpt.value = "";
   defaultOpt.textContent = curModel
     ? "Default (" + curModel + ")"
     : "Default model";
   modelSelect.appendChild(defaultOpt);
+  var defJudgeOpt = document.createElement("option"); // NEW
+  defJudgeOpt.value = ""; // NEW
+  defJudgeOpt.textContent = "Default Judge"; // NEW
+  judgeSelect.appendChild(defJudgeOpt); // NEW
   authFetch("/v1/api/models")
     .then(function (r) {
       return r.json();
@@ -2417,6 +2488,11 @@ function showNewWsModal() {
         opt.textContent =
           m.alias === m.model ? m.alias : m.alias + " (" + m.model + ")";
         modelSelect.appendChild(opt);
+        
+        var judgeOpt = document.createElement("option"); // NEW
+        judgeOpt.value = m.alias; // NEW
+        judgeOpt.textContent = opt.textContent; // NEW
+        judgeSelect.appendChild(judgeOpt); // NEW
       });
     })
     .catch(function () {
@@ -2497,6 +2573,7 @@ function showNewWsModal() {
 }
 
 function hideNewWsModal() {
+  _forkFromWsId = "";
   document.getElementById("new-ws-overlay").style.display = "none";
   document.body.style.overflow = "";
   if (_newWsTrapHandler) {
@@ -2510,15 +2587,18 @@ function submitNewWs() {
   var submitBtn = document.getElementById("new-ws-submit");
   if (submitBtn.disabled) return;
   submitBtn.disabled = true;
-  submitBtn.textContent = "Creating\u2026";
+  submitBtn.textContent = _forkFromWsId ? "Forking\u2026" : "Creating\u2026";
 
   var body = {};
   var name = document.getElementById("new-ws-name").value.trim();
   var model = document.getElementById("new-ws-model").value.trim();
+  var judge_model = document.getElementById("new-ws-judge-model").value.trim();
   var skill = document.getElementById("new-ws-skill").value;
   if (name) body.name = name;
   if (model) body.model = model;
-  if (skill) body.skill = skill;
+  if (judge_model) body.judge_model = judge_model;
+  if (skill && !_forkFromWsId) body.skill = skill;
+  if (_forkFromWsId) body.resume_ws = _forkFromWsId;
 
   var errEl = document.getElementById("new-ws-error");
   errEl.style.display = "none";
@@ -2536,7 +2616,7 @@ function submitNewWs() {
         errEl.textContent = data.error;
         errEl.style.display = "block";
         submitBtn.disabled = false;
-        submitBtn.textContent = "Create";
+        submitBtn.textContent = _forkFromWsId ? "Fork" : "Create";
         return;
       }
       if (data.ws_id) {
@@ -2546,14 +2626,14 @@ function submitNewWs() {
       }
     })
     .catch(function () {
-      errEl.textContent = "Failed to create workstream";
+      errEl.textContent = _forkFromWsId ? "Failed to fork workstream" : "Failed to create workstream";
       errEl.style.display = "block";
       submitBtn.disabled = false;
-      submitBtn.textContent = "Create";
+      submitBtn.textContent = _forkFromWsId ? "Fork" : "Create";
     });
 }
 
-function _reassignPanesForClosedWs(closedWsId) {
+function _reassignPanesForClosedWs(closedWsId, tabIdsBeforeClose) {
   var remaining = Object.keys(workstreams);
   // Collect panes showing the closed ws
   var affected = [];
@@ -2561,6 +2641,65 @@ function _reassignPanesForClosedWs(closedWsId) {
     if (panes[pid].wsId === closedWsId) affected.push(pid);
   }
   if (!affected.length) return;
+
+  // Determine target ws based on close_tab_action setting
+  var action = "last_used";
+  try { action = localStorage.getItem("turnstone_interface.close_tab_action") || "last_used"; } catch (_) {}
+
+  if (action === "dashboard" && remaining.length > 0) {
+    // Show dashboard, but still need to reassign panes to valid ws
+    for (var di = 0; di < affected.length; di++) {
+      var dp = panes[affected[di]];
+      dp.disconnectSSE();
+      if (remaining.length) {
+        dp.wsId = remaining[0];
+        dp.messagesEl.innerHTML = "";
+        dp.showEmptyState();
+        dp.updateWsName();
+        dp.connectSSE(remaining[0]);
+      }
+    }
+    if (focusedPaneId && panes[focusedPaneId]) {
+      currentWsId = panes[focusedPaneId].wsId;
+    }
+    renderTabBar();
+    showDashboard();
+    loadDashboard();
+    return;
+  }
+
+  // Determine preferred target ws_id
+  var preferredWsId = null;
+  if (action === "last_used") {
+    if (_lastActiveWsId && _lastActiveWsId !== closedWsId && workstreams[_lastActiveWsId]) {
+      preferredWsId = _lastActiveWsId;
+    }
+  } else if (action === "nearest_left" || action === "nearest_right") {
+    var idx = tabIdsBeforeClose ? tabIdsBeforeClose.indexOf(closedWsId) : -1;
+    if (idx >= 0) {
+      if (action === "nearest_left") {
+        // Walk left, then right
+        for (var li = idx - 1; li >= 0; li--) {
+          if (workstreams[tabIdsBeforeClose[li]]) { preferredWsId = tabIdsBeforeClose[li]; break; }
+        }
+        if (!preferredWsId) {
+          for (var ri = idx + 1; ri < tabIdsBeforeClose.length; ri++) {
+            if (workstreams[tabIdsBeforeClose[ri]]) { preferredWsId = tabIdsBeforeClose[ri]; break; }
+          }
+        }
+      } else {
+        // Walk right, then left
+        for (var ri2 = idx + 1; ri2 < tabIdsBeforeClose.length; ri2++) {
+          if (workstreams[tabIdsBeforeClose[ri2]]) { preferredWsId = tabIdsBeforeClose[ri2]; break; }
+        }
+        if (!preferredWsId) {
+          for (var li2 = idx - 1; li2 >= 0; li2--) {
+            if (workstreams[tabIdsBeforeClose[li2]]) { preferredWsId = tabIdsBeforeClose[li2]; break; }
+          }
+        }
+      }
+    }
+  }
 
   // Build set of ws_ids already shown by non-affected panes
   var usedWsIds = {};
@@ -2570,16 +2709,20 @@ function _reassignPanesForClosedWs(closedWsId) {
 
   for (var i = 0; i < affected.length; i++) {
     var p = panes[affected[i]];
-    // Find an unused ws_id for this pane
+    // Try the preferred ws first, then fall back to first unused
     var newWsId = null;
-    for (var j = 0; j < remaining.length; j++) {
-      if (!usedWsIds[remaining[j]]) {
-        newWsId = remaining[j];
-        break;
+    if (preferredWsId && !usedWsIds[preferredWsId]) {
+      newWsId = preferredWsId;
+    } else {
+      for (var j = 0; j < remaining.length; j++) {
+        if (!usedWsIds[remaining[j]]) {
+          newWsId = remaining[j];
+          break;
+        }
       }
     }
     if (newWsId) {
-      // Reassign pane to an unused workstream
+      // Reassign pane to the target workstream
       p.disconnectSSE();
       p.wsId = newWsId;
       p.messagesEl.innerHTML = "";
@@ -2605,9 +2748,20 @@ function _reassignPanesForClosedWs(closedWsId) {
   if (focusedPaneId && panes[focusedPaneId]) {
     currentWsId = panes[focusedPaneId].wsId;
   }
+  renderTabBar();
+  if (currentWsId && workstreams[currentWsId]) {
+    switchTab(currentWsId);
+  }
 }
 
 function closeWorkstream(wsId) {
+  // Capture tab order from DOM (visual order) before deletion for close_tab_action=nearest_left/right
+  var tabIdsBeforeClose = Array.from(
+    document.querySelectorAll("#tab-list .ws-tab"),
+  ).map(function (tab) {
+    return tab.dataset.wsId;
+  });
+
   authFetch("/v1/api/workstreams/close", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -2620,8 +2774,13 @@ function closeWorkstream(wsId) {
       if (data.status === "ok") {
         delete workstreams[wsId];
         renderTabBar();
-        _reassignPanesForClosedWs(wsId);
-        if (!Object.keys(workstreams).length) showDashboard();
+        _reassignPanesForClosedWs(wsId, tabIdsBeforeClose);
+        var remaining = Object.keys(workstreams);
+        if (remaining.length === 0) {
+          loadDashboard();
+          showDashboard();
+        }
+        updateWsActionButtons();
       }
     });
 }
@@ -2708,8 +2867,8 @@ function renderDashboardTable(wsList, agg) {
   wsList.forEach(function (ws) {
     var liveState =
       (workstreams[ws.id] && workstreams[ws.id].state) || ws.state || "idle";
-    var liveName =
-      (workstreams[ws.id] && workstreams[ws.id].name) || ws.name || ws.id;
+    var liveName = ws.name ||
+      (workstreams[ws.id] && workstreams[ws.id].name) || ws.id;
     var sd = STATE_DISPLAY[liveState] || STATE_DISPLAY.idle;
 
     var row = document.createElement("div");
@@ -2828,7 +2987,12 @@ function updateDashFooter(agg) {
   }
 }
 
+var _wsDeleteMode = false;
+var _wsDeleteSelected = {};
+var _wsSavedItems = [];
+
 function renderSavedWorkstreams(items) {
+  _wsSavedItems = items;
   var c = document.getElementById("dashboard-saved-cards");
   c.innerHTML = "";
   if (!items.length) {
@@ -2837,32 +3001,373 @@ function renderSavedWorkstreams(items) {
   }
   items.forEach(function (sess) {
     var card = document.createElement("div");
-    card.className = "dashboard-card";
-    card.setAttribute("role", "button");
-    card.setAttribute("tabindex", "0");
+    card.className = "dashboard-card" + (_wsDeleteMode ? " ws-delete-mode" : "");
+    card.dataset.wsId = sess.ws_id;
     var label = sess.alias || sess.title || sess.ws_id;
-    card.setAttribute("aria-label", "Resume: " + label);
-    card.onclick = function () {
-      dashboardResumeSession(sess.ws_id);
-    };
-    card.onkeydown = function (e) {
-      if (e.key === "Enter" || e.key === " ") {
-        e.preventDefault();
+    card.setAttribute("aria-label", _wsDeleteMode ? "Select: " + label : "Resume: " + label);
+
+    if (_wsDeleteMode) {
+      var chk = document.createElement("input");
+      chk.type = "checkbox";
+      chk.className = "ws-card-check";
+      chk.checked = !!_wsDeleteSelected[sess.ws_id];
+      chk.onclick = function (e) {
+        e.stopPropagation();
+        if (chk.checked) _wsDeleteSelected[sess.ws_id] = true;
+        else delete _wsDeleteSelected[sess.ws_id];
+        card.classList.toggle("ws-selected", chk.checked);
+        updateWsDeleteBar();
+      };
+      card.appendChild(chk);
+      card.onclick = function (e) {
+        if (e.target === chk) return;
+        chk.checked = !chk.checked;
+        chk.onclick(e);
+      };
+    } else {
+      card.setAttribute("role", "button");
+      card.setAttribute("tabindex", "0");
+      card.onclick = function () {
         dashboardResumeSession(sess.ws_id);
-      }
-    };
-    var title = sess.alias || sess.title || sess.ws_id.substring(0, 12);
+      };
+      card.onkeydown = function (e) {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          dashboardResumeSession(sess.ws_id);
+        }
+      };
+    }
+
+    var title = sess.alias || sess.title || sess.name || sess.ws_id.substring(0, 12);
     var meta = sess.message_count + " msgs";
     if (sess.updated) meta += " \u00b7 " + formatRelativeTime(sess.updated);
-    card.innerHTML =
+    var inner = document.createElement("div");
+    inner.innerHTML =
       '<div class="card-title">' +
       escapeHtml(title) +
       "</div>" +
       '<div class="card-meta">' +
       escapeHtml(meta) +
+      ' <span class="card-wsid">' + escapeHtml(sess.ws_id.substring(0, 7)) + '</span>' +
       "</div>";
+    while (inner.firstChild) card.appendChild(inner.firstChild);
+
+    if (_wsDeleteMode && _wsDeleteSelected[sess.ws_id]) {
+      card.classList.add("ws-selected");
+    }
     c.appendChild(card);
   });
+}
+
+function startWsDeleteMode() {
+  _wsDeleteMode = true;
+  _wsDeleteSelected = {};
+  renderSavedWorkstreams(_wsSavedItems);
+  var btn = document.getElementById("ws-delete-btn");
+  if (btn) {
+    btn.textContent = "\u2715 Cancel";
+    btn.onclick = cancelWsDeleteMode;
+  }
+  var bar = document.getElementById("ws-delete-bar");
+  if (bar) bar.classList.add("visible");
+}
+
+function cancelWsDeleteMode() {
+  _wsDeleteMode = false;
+  _wsDeleteSelected = {};
+  renderSavedWorkstreams(_wsSavedItems);
+  var btn = document.getElementById("ws-delete-btn");
+  if (btn) {
+    btn.innerHTML = "&#x1f5d1; Delete";
+    btn.onclick = startWsDeleteMode;
+  }
+  var bar = document.getElementById("ws-delete-bar");
+  if (bar) bar.classList.remove("visible");
+}
+
+function updateWsDeleteBar() {
+  var count = Object.keys(_wsDeleteSelected).length;
+  var label = document.getElementById("ws-delete-bar-count");
+  if (label) label.textContent = count + " selected";
+  var delBtn = document.getElementById("ws-delete-bar-delete");
+  if (delBtn) delBtn.disabled = count === 0;
+  var selBtn = document.getElementById("ws-delete-bar-select-all");
+  if (selBtn) {
+    var allSelected = count === _wsSavedItems.length && _wsSavedItems.length > 0;
+    selBtn.textContent = allSelected ? "Deselect All" : "Select All";
+  }
+}
+
+function toggleSelectAll() {
+  var allSelected = Object.keys(_wsDeleteSelected).length === _wsSavedItems.length && _wsSavedItems.length > 0;
+  if (allSelected) {
+    _wsDeleteSelected = {};
+  } else {
+    _wsSavedItems.forEach(function (s) { _wsDeleteSelected[s.ws_id] = true; });
+  }
+  renderSavedWorkstreams(_wsSavedItems);
+  updateWsDeleteBar();
+}
+
+function confirmWsDeleteSelection() {
+  var selected = Object.keys(_wsDeleteSelected);
+  if (!selected.length) {
+    showToast("No workstreams selected", "warning");
+    return;
+  }
+  var overlay = document.getElementById("ws-delete-overlay");
+  var countEl = document.getElementById("ws-delete-count");
+  var listEl = document.getElementById("ws-delete-list");
+  var errorEl = document.getElementById("ws-delete-error");
+  errorEl.textContent = "";
+  countEl.textContent = selected.length + " workstream(s) will be permanently deleted:";
+  listEl.innerHTML = "";
+  selected.forEach(function (wsId) {
+    var item = _wsSavedItems.find(function (s) { return s.ws_id === wsId; });
+    var name = item ? (item.alias || item.title || wsId) : wsId;
+    var div = document.createElement("div");
+    div.className = "ws-delete-item";
+    div.textContent = name;
+    listEl.appendChild(div);
+  });
+  overlay.style.display = "flex";
+}
+
+function cancelWsDelete() {
+  document.getElementById("ws-delete-overlay").style.display = "none";
+}
+
+function confirmWsDelete() {
+  var selected = Object.keys(_wsDeleteSelected);
+  if (!selected.length) return;
+  var overlay = document.getElementById("ws-delete-overlay");
+  var errorEl = document.getElementById("ws-delete-error");
+  var listEl = document.getElementById("ws-delete-list");
+  var countEl = document.getElementById("ws-delete-count");
+  var delBtn = document.getElementById("ws-delete-confirm-btn");
+  var cancelBtn = document.getElementById("ws-delete-cancel-btn");
+  errorEl.textContent = "";
+
+  // Disable buttons during deletion
+  if (delBtn) { delBtn.disabled = true; delBtn.textContent = "Deleting..."; }
+  if (cancelBtn) cancelBtn.disabled = true;
+
+  var results = [];
+  var promises = selected.map(function (wsId) {
+    var shortId = wsId.substring(0, 8);
+    var item = _wsSavedItems.find(function (s) { return s.ws_id === wsId; });
+    var name = item ? (item.alias || item.title || wsId) : wsId;
+    var url = "/v1/api/workstreams/" + encodeURIComponent(wsId) + "/delete";
+
+    return authFetch(url, { method: "POST" })
+      .then(function (r) {
+        var status = r.status;
+        var contentType = r.headers.get("content-type") || "";
+        if (r.ok) {
+          results.push({ name: name, shortId: shortId, ok: true });
+          return;
+        }
+        // Read body as text first to avoid JSON parse errors
+        return r.text().then(function (body) {
+          var errMsg = shortId + ": HTTP " + status;
+          if (contentType.includes("json")) {
+            try {
+              var j = JSON.parse(body);
+              if (j.error) errMsg = shortId + ": " + j.error;
+            } catch (_) { /* fall through */ }
+          } else if (body) {
+            errMsg = shortId + ": " + body.substring(0, 200);
+          }
+          results.push({ name: name, shortId: shortId, ok: false, error: errMsg });
+        });
+      })
+      .catch(function (err) {
+        results.push({ name: name, shortId: shortId, ok: false, error: shortId + ": " + err.message });
+      });
+  });
+
+  Promise.all(promises).then(function () {
+    // Rebuild the list with results
+    listEl.innerHTML = "";
+    results.forEach(function (r) {
+      var div = document.createElement("div");
+      div.className = "ws-delete-item" + (r.ok ? "" : " ws-delete-error");
+      div.textContent = (r.ok ? "\u2713 " : "\u2717 ") + r.name + (r.error ? " — " + r.error : "");
+      listEl.appendChild(div);
+    });
+
+    var okCount = results.filter(function (r) { return r.ok; }).length;
+    var failCount = results.filter(function (r) { return !r.ok; }).length;
+    countEl.textContent = okCount + " deleted, " + failCount + " failed";
+
+    if (delBtn) { delBtn.disabled = false; delBtn.textContent = "Close"; delBtn.onclick = function () { cancelWsDelete(); cancelWsDeleteMode(); loadDashboard(); }; }
+    if (cancelBtn) cancelBtn.disabled = false;
+  });
+}
+
+// --- Workstream title management ---
+
+var _lastActiveWsId = null;
+
+function refreshWorkstreamTitle() {
+  var wsId = getCurrentWsId();
+  if (!wsId) return;
+
+  _setTitleState(wsId, "refreshing");
+
+  var url = "/v1/api/workstreams/" + encodeURIComponent(wsId) + "/refresh-title";
+
+  authFetch(url, { method: "POST" })
+    .then(function (r) {
+      if (!r.ok) throw new Error("Failed to refresh title (HTTP " + r.status + ")");
+      return r.json();
+    })
+    .then(function (data) {
+      showToast("Title regeneration started…", "info");
+    })
+    .catch(function (err) {
+      showToast(err.message || "Failed to refresh title", "error");
+      _setTitleState(wsId, "idle");
+    });
+}
+
+// --- Per-workstream title state tracking ---
+
+var _wsTitleState = {}; // { wsId: "idle" | "refreshing" | "error" }
+
+function _setTitleState(wsId, state) {
+  if (state === "idle" || state === "error") delete _wsTitleState[wsId];
+  else _wsTitleState[wsId] = state;
+  _applyTitleButtonState();
+}
+
+function _applyTitleButtonState() {
+  var btn = document.getElementById("refresh-title-btn");
+  if (!btn) return;
+  var wsId = getCurrentWsId();
+  var state = _wsTitleState[wsId] || "idle";
+  if (state === "refreshing") {
+    btn.innerHTML = "&#x23f3;";
+    btn.disabled = true;
+  } else if (state === "error") {
+    btn.innerHTML = "&#x2717;";
+    btn.disabled = false;
+    btn.onclick = function () { _setTitleState(wsId, "idle"); refreshWorkstreamTitle(); };
+    return;
+  } else {
+    btn.innerHTML = "&#x21bb;";
+    btn.disabled = false;
+    btn.onclick = refreshWorkstreamTitle;
+  }
+}
+
+function editWorkstreamTitle() {
+  var wsId = getCurrentWsId();
+  if (!wsId) return;
+  var currentTitle = "";
+  var tabEl = document.querySelector('.ws-tab[data-ws-id="' + wsId + '"] .tab-name');
+  if (tabEl) currentTitle = tabEl.textContent.trim();
+
+  var overlay = document.getElementById("edit-title-overlay");
+  var input = document.getElementById("edit-title-input");
+  input.value = currentTitle;
+  overlay.style.display = "flex";
+  setTimeout(function () { input.focus(); input.select(); }, 50);
+}
+
+function cancelEditTitle() {
+  document.getElementById("edit-title-overlay").style.display = "none";
+}
+
+function submitEditTitle() {
+  var wsId = getCurrentWsId();
+  if (!wsId) return;
+  var input = document.getElementById("edit-title-input");
+  var newTitle = input.value.trim();
+  if (!newTitle) { showToast("Title cannot be empty", "warning"); return; }
+
+  var url = "/v1/api/workstreams/" + encodeURIComponent(wsId) + "/title";
+
+  authFetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ title: newTitle })
+  })
+    .then(function (r) {
+      if (!r.ok) throw new Error("Failed to set title (HTTP " + r.status + ")");
+      return r.json();
+    })
+    .then(function (data) {
+      cancelEditTitle();
+      showToast("Title updated", "success");
+    })
+    .catch(function (err) {
+      showToast(err.message || "Failed to set title", "error");
+    });
+}
+
+// --- Workstream deletion ---
+
+var _pendingDeleteWsId = null;
+
+function confirmDeleteWorkstream() {
+  var wsId = getCurrentWsId();
+  if (!wsId) return;
+  var tabEl = document.querySelector('.ws-tab[data-ws-id="' + wsId + '"] .tab-name');
+  var name = tabEl ? tabEl.textContent.trim() : wsId.substring(0, 12);
+
+  _pendingDeleteWsId = wsId;
+  var overlay = document.getElementById("delete-ws-overlay");
+  var msg = document.getElementById("delete-ws-message");
+  msg.textContent = "Delete \"" + name + "\"? This cannot be undone.";
+  overlay.style.display = "flex";
+}
+
+function cancelDeleteWs() {
+  _pendingDeleteWsId = null;
+  document.getElementById("delete-ws-overlay").style.display = "none";
+}
+
+function executeDeleteWs() {
+  var wsId = _pendingDeleteWsId;
+  if (!wsId) return;
+  cancelDeleteWs();
+
+  var url = "/v1/api/workstreams/" + encodeURIComponent(wsId) + "/delete";
+
+  authFetch(url, { method: "POST" })
+    .then(function (r) {
+      if (!r.ok) throw new Error("Failed to delete workstream (HTTP " + r.status + ")");
+      return r.json();
+    })
+    .then(function () {
+      closeWorkstream(wsId);
+      showToast("Workstream deleted", "success");
+    })
+    .catch(function (err) {
+      showToast(err.message || "Failed to delete workstream", "error");
+    });
+}
+
+function getCurrentWsId() {
+  var activeTab = document.querySelector(".ws-tab.active");
+  if (activeTab) return activeTab.dataset.wsId || "";
+  return "";
+}
+
+function updateWsActionButtons() {
+  var hasActiveWs = !!getCurrentWsId();
+  var ids = ["refresh-title-btn", "edit-title-btn", "fork-ws-btn", "delete-ws-btn"];
+  ids.forEach(function (id) {
+    var el = document.getElementById(id);
+    if (el) el.style.display = hasActiveWs ? "" : "none";
+  });
+}
+
+function forkWorkstream() {
+  var wsId = getCurrentWsId();
+  if (!wsId) return;
+  showNewWsModal(wsId);
 }
 
 function formatRelativeTime(iso) {
@@ -2891,10 +3396,9 @@ function dashboardSwitchWorkstream(wsId) {
 }
 
 function dashboardResumeSession(wsId) {
-  authFetch("/v1/api/workstreams/new", {
+  authFetch("/v1/api/workstreams/" + encodeURIComponent(wsId) + "/open", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ resume_ws: wsId }),
   })
     .then(function (r) {
       if (!r.ok) throw new Error("HTTP " + r.status);
@@ -2907,7 +3411,7 @@ function dashboardResumeSession(wsId) {
       hideDashboard();
     })
     .catch(function (err) {
-      showToast("Failed to resume workstream", "error");
+      showToast("Failed to open workstream", "error");
     });
 }
 
@@ -3002,22 +3506,33 @@ function connectGlobalSSE() {
       }
     } else if (data.type === "ws_rename") {
       if (workstreams[data.ws_id]) workstreams[data.ws_id].name = data.name;
-      var nameEl = document.querySelector(
+      // Update ALL matching tab elements (not just first one)
+      var nameEls = document.querySelectorAll(
         '[data-ws-id="' + data.ws_id + '"] .tab-name',
       );
-      if (nameEl) nameEl.textContent = data.name;
+      nameEls.forEach(function (el) {
+        el.textContent = data.name;
+      });
       // Update all panes showing this workstream
       for (var id in panes) {
         if (panes[id].wsId === data.ws_id) panes[id].updateWsName();
       }
+      // Title generation completed — reset state
+      _setTitleState(data.ws_id, "idle");
     } else if (data.type === "ws_created") {
       workstreams[data.ws_id] = workstreams[data.ws_id] || {};
       workstreams[data.ws_id].name = data.name || data.ws_id.slice(0, 6);
       workstreams[data.ws_id].state = "idle";
       renderTabBar();
-    } else if (data.type === "ws_closed") {
-      var wsId = data.ws_id;
-      // Disconnect per-ws SSE on affected panes immediately so stale
+} else if (data.type === "ws_closed") {
+  var wsId = data.ws_id;
+  // Capture tab order from DOM (visual order) before deletion for close_tab_action=nearest_left/right
+  var sseTabIds = Array.from(
+    document.querySelectorAll("#tab-list .ws-tab"),
+  ).map(function (tab) {
+    return tab.dataset.wsId;
+  });
+  // Disconnect per-ws SSE on affected panes immediately so stale
       // events from the dying workstream don't leak into reassigned panes.
       for (var cid in panes) {
         if (panes[cid].wsId === wsId) panes[cid].disconnectSSE();
@@ -3029,8 +3544,11 @@ function connectGlobalSSE() {
           "Evicted" + (data.name ? ": " + data.name : "") + " (capacity)",
         );
       }
-      _reassignPanesForClosedWs(wsId);
+      _reassignPanesForClosedWs(wsId, sseTabIds);
       if (!Object.keys(workstreams).length) showDashboard();
+    } else if (data.type === "settings_changed") {
+      // Re-load interface settings and apply immediately
+      loadInterfaceSettings();
     }
   };
   globalEvtSource.onerror = function () {
@@ -3962,7 +4480,40 @@ function initWorkstreams() {
 
 initLogin();
 pollHealth();
+loadInterfaceSettings();
 initWorkstreams();
+
+function loadInterfaceSettings() {
+  authFetch("/v1/api/admin/settings")
+    .then(function (r) { return r.json(); })
+    .then(function (data) {
+      var settings = data.settings || [];
+      for (var i = 0; i < settings.length; i++) {
+        var s = settings[i];
+        if (s.key && s.key.indexOf("interface.") === 0) {
+          try { localStorage.setItem("turnstone_" + s.key, s.value); } catch (_) {}
+        }
+      }
+      var theme = localStorage.getItem("turnstone_interface.theme");
+      var currentTheme = document.documentElement.dataset.theme;
+      if (theme) {
+        var effectiveTheme = theme === "light" ? "light" : "";
+        if (effectiveTheme !== currentTheme) {
+          document.documentElement.dataset.theme = effectiveTheme;
+          localStorage.setItem("turnstone-theme", theme);
+          var btn = document.getElementById("theme-toggle");
+          if (btn) {
+            btn.innerHTML = theme === "light" ? "&#9728;" : "&#9790;";
+            btn.title = theme === "light" ? "Switch to dark theme" : "Switch to light theme";
+          }
+          reRenderAllMermaid();
+        }
+      }
+    })
+    .catch(function (err) {
+      // Silently ignore — settings are optional on load
+    });
+}
 
 // Back/forward button: retrace dashboard -> tab navigation.
 window.addEventListener("popstate", function (e) {
