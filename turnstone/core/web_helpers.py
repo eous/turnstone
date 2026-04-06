@@ -30,6 +30,8 @@ async def read_json_or_400(request: Request) -> dict[str, Any] | JSONResponse:
         return body
     except (ValueError, json.JSONDecodeError):
         return _JSONResponse({"error": "Invalid JSON body"}, status_code=400)
+    except Exception:
+        return _JSONResponse({"error": "Failed to read request body"}, status_code=400)
 
 
 def require_storage_or_503(

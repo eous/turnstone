@@ -292,6 +292,15 @@ def get_workstream_display_name(ws_id: str) -> str | None:
         return None
 
 
+def get_workstream_metadata(ws_id: str) -> dict[str, Any] | None:
+    """Return workstream metadata dict or None if not found."""
+    try:
+        return get_storage().get_workstream_metadata(ws_id)
+    except Exception:
+        log.warning("Failed to get workstream metadata ws=%s", ws_id, exc_info=True)
+        return None
+
+
 def update_workstream_title(ws_id: str, title: str) -> None:
     """Set or update the auto-generated title for a workstream."""
     try:

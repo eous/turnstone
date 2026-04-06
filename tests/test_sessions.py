@@ -132,7 +132,7 @@ class TestListWorkstreamsWithHistory:
         save_message("sess1", "user", "hello")
         save_message("sess1", "assistant", "hi")
         rows = list_workstreams_with_history()
-        assert rows[0][5] == 2  # msg_count
+        assert rows[0][6] == 2  # msg_count (after ws_id, alias, title, name, created, updated)
 
     def test_respects_limit(self, tmp_db):
         for i in range(5):

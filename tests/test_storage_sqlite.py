@@ -274,9 +274,9 @@ class TestWorkstreams:
         backend.save_message("ws1", "user", "hello")
         rows = backend.list_workstreams_with_history()
         assert len(rows) == 1
-        # Columns: ws_id, alias, title, created, updated, count, node_id
+        # Columns: ws_id, alias, title, name, created, updated, count, node_id
         assert rows[0][0] == "ws1"
-        assert rows[0][6] == "node-a"
+        assert rows[0][7] == "node-a"
 
 
 # -- Structured memory touch ---------------------------------------------------

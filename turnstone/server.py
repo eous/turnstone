@@ -121,6 +121,9 @@ class WebUI:
         # and piggybacked onto the ws_state:idle global SSE event, then reset.
         self._ws_turn_content: list[str] = []
         self._ws_turn_content_size: int = 0
+        # Cached LLM verdicts keyed by call_id — replayed on SSE reconnect
+        # so tab-switching doesn't lose the final judge result.
+        self._llm_verdicts: dict[str, dict[str, Any]] = {}
 
     def _enqueue(self, data: dict[str, Any]) -> None:
         # Stamp ws_id on every per-workstream event so the client can
@@ -221,6 +224,7 @@ class WebUI:
 
     def approve_tools(self, items: list[dict[str, Any]]) -> tuple[bool, str | None]:
         self._last_verdict_decision = ""  # reset for new approval cycle
+        self._llm_verdicts.clear()  # clear stale verdicts from prior cycle
         pending = [it for it in items if it.get("needs_approval") and not it.get("error")]
 
         # Always send tool info to the browser
@@ -519,6 +523,14 @@ class WebUI:
 
     def on_intent_verdict(self, verdict: dict[str, Any]) -> None:
         """Deliver LLM judge verdict to frontend via SSE."""
+        # Cache for replay on SSE reconnect (tab switching)
+        call_id = verdict.get("call_id", "")
+        if call_id:
+            # Evict oldest entry if cache is full (defensive cap of 50)
+            if len(self._llm_verdicts) >= 50 and call_id not in self._llm_verdicts:
+                oldest_key = next(iter(self._llm_verdicts))
+                del self._llm_verdicts[oldest_key]
+            self._llm_verdicts[call_id] = verdict
         self._enqueue({"type": "intent_verdict", **verdict})
         # Persist the LLM verdict (fire-and-forget)
         try:
@@ -915,6 +927,9 @@ async def events_sse(request: Request) -> Response:
         # Re-inject pending approval or plan review
         if ui._pending_approval is not None:
             yield {"data": json.dumps(ui._pending_approval)}
+            # Replay any LLM verdicts received since the approval was sent
+            for v in ui._llm_verdicts.values():
+                yield {"data": json.dumps({"type": "intent_verdict", **v})}
         if ui._pending_plan_review is not None:
             yield {"data": json.dumps(ui._pending_plan_review)}
 
@@ -976,7 +991,7 @@ def _build_node_snapshot(app_state: Any) -> dict[str, Any]:
         ws_list.append(
             {
                 "id": ws.id,
-                "name": ws.name,
+                "name": title or ws.name,
                 "state": ws.state.value,
                 "title": title,
                 "tokens": tok,
@@ -1065,13 +1080,15 @@ async def global_events_sse(request: Request) -> Response:
 
 async def list_workstreams(request: Request) -> JSONResponse:
     """GET /v1/api/workstreams — list all workstreams."""
+    from turnstone.core.memory import get_workstream_display_name
     mgr: WorkstreamManager = request.app.state.workstreams
     result = []
     for ws in mgr.list_all():
+        title = get_workstream_display_name(ws.id) or ws.name
         result.append(
             {
                 "id": ws.id,
-                "name": ws.name,
+                "name": title,
                 "state": ws.state.value,
             }
         )
@@ -1106,7 +1123,7 @@ async def dashboard(request: Request) -> JSONResponse:
         ws_list.append(
             {
                 "id": ws.id,
-                "name": ws.name,
+                "name": title or ws.name,
                 "state": ws.state.value,
                 "title": title,
                 "tokens": tok,
@@ -1145,11 +1162,12 @@ async def list_saved_workstreams(request: Request) -> JSONResponse:
             "ws_id": wid,
             "alias": alias,
             "title": title,
+            "name": name,
             "created": created,
             "updated": updated,
             "message_count": count,
         }
-        for wid, alias, title, created, updated, count, *_extra in rows
+        for wid, alias, title, name, created, updated, count, *_extra in rows
     ]
     return JSONResponse({"workstreams": result})
 
@@ -1803,6 +1821,7 @@ def _deliver_notification(
 
 async def create_workstream(request: Request) -> JSONResponse:
     """POST /v1/api/workstreams/new — create a new workstream."""
+    from turnstone.core.memory import get_workstream_display_name
     from turnstone.core.web_helpers import read_json_or_400
 
     body = await read_json_or_400(request)
@@ -1863,6 +1882,7 @@ async def create_workstream(request: Request) -> JSONResponse:
             skill_version=applied_skill_version,
             ws_id=requested_ws_id,
             client_type=body.get("client_type", "") or "",
+            judge_model=body.get("judge_model", "") or None,
         )
         if not isinstance(ws.ui, WebUI):
             raise TypeError(f"Expected WebUI, got {type(ws.ui).__name__}")
@@ -1875,13 +1895,14 @@ async def create_workstream(request: Request) -> JSONResponse:
                 runner, dispatch_fn=_make_watch_dispatch(ws, ws.session, ws.ui)
             )
         # Emit creation event on global queue for SSE consumers (console)
+        display_name = get_workstream_display_name(ws.id) or ws.name
         gq: queue.Queue[dict[str, Any]] = request.app.state.global_queue
         with contextlib.suppress(queue.Full):
             gq.put_nowait(
                 {
                     "type": "ws_created",
                     "ws_id": ws.id,
-                    "name": ws.name,
+                    "name": display_name,
                     "model": ws.session.model if ws.session else "",
                     "model_alias": ws.session.model_alias if ws.session else "",
                 }
@@ -1905,16 +1926,31 @@ async def create_workstream(request: Request) -> JSONResponse:
             from turnstone.core.memory import get_workstream_display_name, resolve_workstream
 
             target_id = resolve_workstream(resume_ws_id)
-            if target_id and ws.session.resume(target_id):
+            if target_id and ws.session.resume(target_id, fork=True):
                 resumed = True
                 message_count = len(ws.session.messages)
-                ws.name = get_workstream_display_name(target_id) or ws.name
+                # If the user provided a custom name, set it as the fork's alias
+                # so it takes priority in display.  Otherwise inherit the source name.
+                user_name = body.get("name", "").strip()
+                if user_name:
+                    from turnstone.core.memory import set_workstream_alias
+
+                    set_workstream_alias(ws.id, user_name)
+                    ws.name = user_name
+                else:
+                    ws.name = get_workstream_display_name(target_id) or ws.name
                 ui = ws.ui
                 if isinstance(ui, WebUI):
                     ui._enqueue({"type": "clear_ui"})
                     history = _build_history(ws.session)
                     if history:
                         ui._enqueue({"type": "history", "messages": history})
+                # Broadcast a rename so the tab picks up the correct fork name
+                # (the ws_created event fired before fork with the pre-fork name).
+                with contextlib.suppress(queue.Full):
+                    gq.put_nowait(
+                        {"type": "ws_rename", "ws_id": ws.id, "name": ws.name}
+                    )
 
         # Apply skill session config (only for new workstreams with a skill)
         if skill_data and not resumed and ws.session:
@@ -2034,7 +2070,171 @@ async def close_workstream(request: Request) -> JSONResponse:
         with contextlib.suppress(queue.Full):
             gq.put_nowait({"type": "ws_closed", "ws_id": ws_id, "reason": "closed"})
         return JSONResponse({"status": "ok"})
-    return JSONResponse({"error": "Cannot close last workstream"}, status_code=400)
+    return JSONResponse({"error": "Workstream not found"}, status_code=404)
+
+
+async def delete_workstream_endpoint(request: Request) -> JSONResponse:
+    """POST /v1/api/workstreams/{ws_id}/delete — permanently delete a saved workstream."""
+    from turnstone.core.log import get_logger
+    from turnstone.core.memory import delete_workstream
+
+    log = get_logger(__name__)
+    ws_id = request.path_params.get("ws_id", "")
+    if not ws_id:
+        log.warning("ws.delete.failed", reason="empty_ws_id")
+        return JSONResponse({"error": "ws_id is required"}, status_code=400)
+    try:
+        if delete_workstream(ws_id):
+            log.info("ws.deleted", ws_id=ws_id[:8])
+            return JSONResponse({"deleted": ws_id})
+        log.warning("ws.delete.failed", reason="not_found", ws_id=ws_id[:8])
+        return JSONResponse({"error": "Workstream not found"}, status_code=404)
+    except Exception as e:
+        log.exception("ws.delete.error", ws_id=ws_id[:8], error=str(e))
+        return JSONResponse({"error": f"Delete failed: {e!s}"}, status_code=500)
+
+
+async def refresh_workstream_title(request: Request, ws_id: str = "") -> JSONResponse:
+    """POST /v1/api/workstreams/{ws_id}/refresh-title — regenerate workstream title via LLM."""
+    from turnstone.core.log import get_logger
+    from turnstone.core.memory import get_workstream_display_name
+
+    log = get_logger(__name__)
+    ws_id = request.path_params.get("ws_id", "")
+    log.info("ws.title.refresh_requested", ws_id=ws_id[:8] if ws_id else "empty")
+    mgr = request.app.state.workstreams
+    ws = mgr.get(ws_id)
+    if not ws or not ws.session:
+        log.warning(
+            "ws.title.refresh_failed",
+            ws_id=ws_id[:8] if ws_id else "empty",
+            reason="workstream_not_found",
+        )
+        return JSONResponse({"error": "Workstream not found or not active"}, status_code=404)
+    # Fetch current title so the LLM can generate something different
+    current_title = get_workstream_display_name(ws_id) or ""
+    log.info("ws.title.refresh_reset_flag", ws_id=ws_id[:8], current_title=current_title[:50])
+    ws.session._title_generated = False
+    threading.Thread(
+        target=ws.session._generate_title,
+        args=(current_title,),
+        daemon=True,
+    ).start()
+    log.info("ws.title.refresh_triggered", ws_id=ws_id[:8])
+    return JSONResponse({"status": "ok"})
+
+
+async def set_workstream_title(request: Request, ws_id: str = "") -> JSONResponse:
+    """POST /v1/api/workstreams/{ws_id}/title — set workstream title manually.
+
+    Stores the user-chosen title as the workstream *alias* so it takes
+    priority over the LLM auto-generated title in the display name
+    fallback chain (alias -> title -> name).
+    """
+    from turnstone.core.log import get_logger
+    from turnstone.core.memory import set_workstream_alias
+    from turnstone.core.web_helpers import read_json_or_400
+
+    log = get_logger(__name__)
+    ws_id = request.path_params.get("ws_id", "")
+    log.info("ws.title.set_requested", ws_id=ws_id[:8] if ws_id else "empty")
+    if not ws_id:
+        return JSONResponse({"error": "ws_id is required"}, status_code=400)
+    body = await read_json_or_400(request)
+    if isinstance(body, JSONResponse):
+        return body
+    title = str(body.get("title", "")).strip()
+    if not title:
+        return JSONResponse({"error": "title is required"}, status_code=400)
+    title = title[:80]
+    if not set_workstream_alias(ws_id, title):
+        log.warning("ws.title.set_alias_conflict", ws_id=ws_id[:8], title=title[:50])
+        return JSONResponse(
+            {"error": "That name is already used by another workstream"},
+            status_code=409,
+        )
+    log.info("ws.title.set_alias_updated", ws_id=ws_id[:8])
+    mgr = request.app.state.workstreams
+    ws = mgr.get(ws_id)
+    if ws and ws.session and ws.session.ui:
+        ws.session.ui.on_rename(title)
+    log.info("ws.title.set_success", ws_id=ws_id[:8], title=title)
+    return JSONResponse({"status": "ok", "title": title})
+
+
+async def open_workstream(request: Request) -> JSONResponse:
+    """POST /v1/api/workstreams/{ws_id}/open — load a saved workstream into memory.
+
+    Unlike resume (which creates a NEW workstream and forks), this endpoint
+    loads the existing workstream into memory with its original ws_id preserved.
+    """
+    from turnstone.core.log import get_logger
+    from turnstone.core.memory import get_workstream_display_name, resolve_workstream
+    from turnstone.core.storage import get_storage as _get_storage
+
+    log = get_logger(__name__)
+    ws_id = request.path_params.get("ws_id", "")
+    if not ws_id:
+        return JSONResponse({"error": "ws_id is required"}, status_code=400)
+
+    resolved_id = resolve_workstream(ws_id)
+    if not resolved_id:
+        return JSONResponse({"error": "Workstream not found"}, status_code=404)
+
+    mgr: WorkstreamManager = request.app.state.workstreams
+
+    if mgr.get(resolved_id):
+        return JSONResponse({
+            "ws_id": resolved_id,
+            "name": get_workstream_display_name(resolved_id) or resolved_id,
+            "already_loaded": True,
+        })
+
+    _st = _get_storage()
+    ws_row = _st.get_workstream_metadata(resolved_id)
+    if not ws_row:
+        return JSONResponse({"error": "Workstream not found in storage"}, status_code=404)
+
+    auth = getattr(getattr(request, "state", None), "auth_result", None)
+    uid: str = getattr(auth, "user_id", "") or ""
+
+    try:
+        ws = mgr.create(
+            name=ws_row.get("name", ""),
+            ui_factory=lambda wid: WebUI(ws_id=wid, user_id=uid),
+            ws_id=resolved_id,
+        )
+    except Exception as e:
+        log.warning("ws.open.create_failed", ws_id=resolved_id[:8], error=str(e))
+        return JSONResponse({"error": f"Failed to load workstream: {e}"}, status_code=500)
+
+    if not isinstance(ws.ui, WebUI):
+        msg = f"Expected WebUI, got {type(ws.ui).__name__}"
+        raise TypeError(msg)
+
+    if ws.session is not None:
+        if ws.session.resume(resolved_id):
+            ws.name = get_workstream_display_name(resolved_id) or ws.name
+            ui = ws.ui
+            ui._enqueue({"type": "clear_ui"})
+            history = _build_history(ws.session)
+            if history:
+                ui._enqueue({"type": "history", "messages": history})
+
+    gq: queue.Queue[dict[str, Any]] = request.app.state.global_queue
+    with contextlib.suppress(queue.Full):
+        gq.put_nowait(
+            {
+                "type": "ws_created",
+                "ws_id": ws.id,
+                "name": ws.name,
+                "model": ws.session.model if ws.session else "",
+                "model_alias": ws.session.model_alias if ws.session else "",
+            }
+        )
+
+    log.info("ws.opened", ws_id=resolved_id[:8])
+    return JSONResponse({"ws_id": ws.id, "name": ws.name})
 
 
 async def list_watches(request: Request) -> JSONResponse:
@@ -2318,12 +2518,108 @@ async def oidc_callback(request: Request) -> Response:
     return await handle_oidc_callback(request, JWT_AUD_SERVER)
 
 
+def list_interface_settings(request: Request) -> JSONResponse:
+    """GET /v1/api/admin/settings — return interface settings from ConfigStore.
+
+    This lightweight endpoint mirrors the console's admin settings endpoint
+    so that the main UI can load interface preferences (theme, close_tab_action)
+    when accessed directly or through the console proxy.  Only returns the
+    ``interface.*`` settings — full admin management is on the console.
+    """
+    from turnstone.core.settings_registry import SETTINGS
+
+    cs = getattr(request.app.state, "config_store", None)
+    settings: list[dict[str, Any]] = []
+    for key, defn in sorted(SETTINGS.items()):
+        if not key.startswith("interface."):
+            continue
+        value = cs.get(key) if cs else defn.default
+        settings.append({
+            "key": key,
+            "value": value,
+            "source": "storage" if cs and key in cs._cache else "default",
+            "type": defn.type,
+            "description": defn.description,
+            "section": defn.section,
+        })
+    return JSONResponse({"settings": settings})
+
+
+async def update_interface_setting(request: Request, key: str = "") -> JSONResponse:
+    """POST /v1/api/admin/settings/{key} — update an interface.* setting.
+
+    Lightweight endpoint so the main UI (served via the console proxy) can
+    persist interface preferences without needing a PUT route.  Only
+    ``interface.*`` keys are accepted; full admin management stays on the
+    console.
+
+    Writes with ``node_id=""`` (global scope) so the console admin page
+    and all nodes see the same value.
+    """
+    from turnstone.core.log import get_logger
+    from turnstone.core.settings_registry import SETTINGS, serialize_value, validate_value
+    from turnstone.core.storage import get_storage as _get_storage
+    from turnstone.core.web_helpers import read_json_or_400
+
+    log = get_logger(__name__)
+    key = request.path_params.get("key", "")
+    if not key.startswith("interface."):
+        return JSONResponse({"error": "only interface.* settings accepted"}, status_code=400)
+    if key not in SETTINGS:
+        return JSONResponse({"error": f"unknown setting: {key}"}, status_code=400)
+
+    body = await read_json_or_400(request)
+    if isinstance(body, JSONResponse):
+        return body
+    if "value" not in body:
+        return JSONResponse({"error": "value is required"}, status_code=400)
+
+    try:
+        typed_value = validate_value(key, body["value"])
+    except (ValueError, KeyError) as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+    # Write to storage with global scope (node_id="") so the console
+    # admin page and all nodes read the same value.
+    storage = _get_storage()
+    if storage is None:
+        return JSONResponse({"error": "storage unavailable"}, status_code=503)
+    defn = SETTINGS[key]
+    storage.upsert_system_setting(
+        key=key,
+        value=serialize_value(typed_value),
+        node_id="",
+        is_secret=defn.is_secret,
+    )
+
+    # Update the local ConfigStore cache so this node sees the change
+    # immediately (without waiting for a config-reload).
+    cs = getattr(request.app.state, "config_store", None)
+    if cs is not None:
+        cs.reload()
+
+    log.info("interface_setting.updated", key=key, value=typed_value)
+
+    # Broadcast settings_changed so other connected clients pick it up
+    gq = getattr(request.app.state, "global_queue", None)
+    if gq is not None:
+        with contextlib.suppress(queue.Full):
+            gq.put_nowait({"type": "settings_changed"})
+
+    return JSONResponse({"status": "ok", "key": key, "value": typed_value})
+
+
 def config_reload(request: Request) -> JSONResponse:
     """POST /v1/api/_internal/config-reload — invalidate config cache."""
     cs = getattr(request.app.state, "config_store", None)
+    gq = getattr(request.app.state, "global_queue", None)
     if not cs:
         return JSONResponse({"status": "noop"})
     cs.reload()
+    # Broadcast settings_changed event to all connected clients
+    if gq is not None:
+        with contextlib.suppress(queue.Full):
+            gq.put_nowait({"type": "settings_changed"})
     return JSONResponse({"status": "ok"})
 
 
@@ -2778,6 +3074,12 @@ def create_app(
                     Route("/api/workstreams", list_workstreams),
                     Route("/api/dashboard", dashboard),
                     Route("/api/workstreams/saved", list_saved_workstreams),
+                    Route("/api/workstreams/new", create_workstream, methods=["POST"]),
+                    Route("/api/workstreams/close", close_workstream, methods=["POST"]),
+                    Route("/api/workstreams/{ws_id}/delete", delete_workstream_endpoint, methods=["POST"]),
+                    Route("/api/workstreams/{ws_id}/open", open_workstream, methods=["POST"]),
+                    Route("/api/workstreams/{ws_id}/refresh-title", refresh_workstream_title, methods=["POST"]),
+                    Route("/api/workstreams/{ws_id}/title", set_workstream_title, methods=["POST"]),
                     Route("/api/skills", list_skills_summary),
                     Route("/api/models", list_available_models),
                     Route("/api/send", send_message, methods=["POST"]),
@@ -2785,8 +3087,6 @@ def create_app(
                     Route("/api/plan", plan_feedback, methods=["POST"]),
                     Route("/api/command", command, methods=["POST"]),
                     Route("/api/cancel", cancel_generation, methods=["POST"]),
-                    Route("/api/workstreams/new", create_workstream, methods=["POST"]),
-                    Route("/api/workstreams/close", close_workstream, methods=["POST"]),
                     Route("/api/watches", list_watches),
                     Route("/api/watches/{watch_id}/cancel", cancel_watch, methods=["POST"]),
                     Route("/api/memories", list_memories),
@@ -2800,6 +3100,8 @@ def create_app(
                     Route("/api/auth/whoami", auth_whoami),
                     Route("/api/auth/oidc/authorize", oidc_authorize),
                     Route("/api/auth/oidc/callback", oidc_callback),
+                    Route("/api/admin/settings", list_interface_settings),
+                    Route("/api/admin/settings/{key:path}", update_interface_setting, methods=["POST"]),
                     Route("/api/_internal/config-reload", config_reload, methods=["POST"]),
                     Route("/api/_internal/mcp-reload", internal_mcp_reload, methods=["POST"]),
                     Route("/api/_internal/mcp-status", internal_mcp_status),
@@ -3159,6 +3461,7 @@ def main() -> None:
         *,
         skill: str | None = None,
         client_type: str = "",
+        judge_model: str | None = None,
     ) -> ChatSession:
         assert ui is not None
         # Resolve the effective alias once and use it consistently
@@ -3187,6 +3490,17 @@ def main() -> None:
         # Re-resolve from ConfigStore so new workstreams pick up hot-reloaded settings.
         live_memory_config = _build_memory_config()
         live_judge_config = _build_judge_config()
+        if live_judge_config and judge_model:
+            import dataclasses
+
+            try:
+                _jm_client, j_model, _jm_cfg = registry.resolve(judge_model)
+                live_judge_config = dataclasses.replace(
+                    live_judge_config,
+                    model=j_model,
+                )
+            except Exception as e:
+                log.warning("Failed to resolve judge_model %r: %s", judge_model, e)
 
         return ChatSession(
             client=r_client,

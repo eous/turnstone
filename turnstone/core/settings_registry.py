@@ -460,6 +460,38 @@ def _build_registry() -> dict[str, SettingDef]:
             "private keys, connection strings) are replaced with [REDACTED] markers "
             "before tool output enters the conversation.",
         ),
+        SettingDef(
+            "judge.cancel_on_approval",
+            "bool",
+            False,
+            "Cancel remaining judge evaluations when user approves",
+            "judge",
+            help="When enabled, the judge stops evaluating remaining tool calls as soon as "
+            "you approve or deny. This saves inference resources but means you won't see "
+            "verdicts for later tool calls. When disabled (default), the judge evaluates "
+            "every tool call to completion so all verdicts are available for later review.",
+        ),
+        # -- interface --------------------------------------------------------
+        SettingDef(
+            "interface.close_tab_action",
+            "str",
+            "last_used",
+            "Action when closing a workstream tab",
+            "interface",
+            choices=["last_used", "nearest_left", "nearest_right", "dashboard"],
+            help="Determines which workstream to switch to after closing a tab. "
+            "'last_used' goes to the most recently active tab, 'nearest_left/right' "
+            "goes to the adjacent tab, 'dashboard' returns to the saved workstreams view.",
+        ),
+        SettingDef(
+            "interface.theme",
+            "str",
+            "dark",
+            "Current UI theme",
+            "interface",
+            choices=["dark", "light"],
+            help="Controls the visual theme of the user interface.",
+        ),
         # -- skills ---------------------------------------------------------
         SettingDef(
             "skills.discovery_url",

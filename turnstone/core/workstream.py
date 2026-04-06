@@ -139,6 +139,7 @@ class WorkstreamManager:
         skill_version: int = 0,
         ws_id: str = "",
         client_type: str = "",
+        judge_model: str | None = None,
     ) -> Workstream:
         """Create a new workstream.  Returns the new ws.
 
@@ -183,6 +184,8 @@ class WorkstreamManager:
         factory_kwargs: dict[str, Any] = {"skill": skill}
         if client_type:
             factory_kwargs["client_type"] = client_type
+        if judge_model:
+            factory_kwargs["judge_model"] = judge_model
         ws.session = self._session_factory(ws.ui, model, ws.id, **factory_kwargs)
 
         # Authoritative insert under lock with re-check (another thread may

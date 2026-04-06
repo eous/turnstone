@@ -304,7 +304,7 @@ class SQLiteBackend:
             return list(
                 conn.execute(
                     sa.text(
-                        "SELECT w.ws_id, w.alias, w.title, w.created, w.updated, "
+                        "SELECT w.ws_id, w.alias, w.title, w.name, w.created, w.updated, "
                         "(SELECT COUNT(*) FROM conversations c "
                         " WHERE c.ws_id = w.ws_id), "
                         "w.node_id "
@@ -452,14 +452,39 @@ class SQLiteBackend:
     def get_workstream_display_name(self, ws_id: str) -> str | None:
         with self._conn() as conn:
             row = conn.execute(
-                sa.select(workstreams.c.alias, workstreams.c.title).where(
+                sa.select(workstreams.c.alias, workstreams.c.title, workstreams.c.name).where(
                     workstreams.c.ws_id == ws_id
                 )
             ).fetchone()
             if row:
-                value = row[0] or row[1]
+                value = row[0] or row[1] or row[2]
                 return str(value) if value is not None else None
-        return None
+            return None
+
+    def get_workstream_metadata(self, ws_id: str) -> dict[str, Any] | None:
+        with self._conn() as conn:
+            row = conn.execute(
+                sa.select(
+                    workstreams.c.ws_id,
+                    workstreams.c.alias,
+                    workstreams.c.title,
+                    workstreams.c.name,
+                    workstreams.c.node_id,
+                    workstreams.c.skill_id,
+                    workstreams.c.skill_version,
+                ).where(workstreams.c.ws_id == ws_id)
+            ).fetchone()
+            if row:
+                return {
+                    "ws_id": row[0],
+                    "alias": row[1],
+                    "title": row[2],
+                    "name": row[3],
+                    "node_id": row[4],
+                    "skill_id": row[5],
+                    "skill_version": row[6],
+                }
+            return None
 
     def update_workstream_title(self, ws_id: str, title: str) -> None:
         with self._conn() as conn:

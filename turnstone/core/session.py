@@ -941,9 +941,14 @@ class ChatSession:
             + output[-half:]
         )
 
-    def _generate_title(self) -> None:
-        """Generate a short title for this session via a background LLM call."""
+    def _generate_title(self, current_title: str = "") -> None:
+        """Generate a short title for this session via a background LLM call.
+
+        When *current_title* is provided (e.g. during a refresh), the prompt
+        asks the LLM to produce a **different** title.
+        """
         ws_id = self._ws_id  # Capture before async work
+        log.info("ws.title.gen_start", ws_id=ws_id[:8])
         try:
             # Gather first user message and first assistant reply
             user_msg = ""
@@ -960,11 +965,32 @@ class ChatSession:
                 if user_msg and asst_msg:
                     break
             if not user_msg:
+                log.info("ws.title.gen_skip", ws_id=ws_id[:8], reason="no_user_message")
+                # Broadcast current name so UI resets any "refreshing" indicator
+                if current_title and self._ws_id == ws_id:
+                    self.ui.on_rename(current_title)
                 return
+            log.info(
+                "ws.title.gen_messages",
+                ws_id=ws_id[:8],
+                user_msg=user_msg[:100],
+                asst_msg=asst_msg[:100],
+            )
             snippet = f"Generate a title for this conversation:\n\nUser: {user_msg}"
             if asst_msg:
                 snippet += f"\nAssistant: {asst_msg}"
+            if current_title:
+                snippet += (
+                    f"\n\nThe current title is: \"{current_title}\"\n"
+                    "The user wants a DIFFERENT title. Generate a new, distinct title "
+                    "that is NOT the same as the current one."
+                )
             snippet += "\n\nTitle:"
+            log.info("ws.title.llm_call_start", ws_id=ws_id[:8])
+
+            # Use slightly higher temperature for refreshes to encourage variety
+            temp = 0.7 if current_title else 0.3
+
             result = self._utility_completion(
                 [
                     {
@@ -981,33 +1007,57 @@ class ChatSession:
                     {"role": "user", "content": snippet},
                 ],
                 max_tokens=200,
+                temperature=temp,
             )
             raw = (result.content or "").strip()
+            log.info("ws.title.llm_response", ws_id=ws_id[:8], raw=raw[:200])
             # Take first line, strip quotes
             title = raw.split("\n")[0].strip().strip('"').strip("'")
             if title and self._ws_id == ws_id:
+                log.info("ws.title.updating", ws_id=ws_id[:8], title=title)
                 update_workstream_title(ws_id, title[:80])
                 self.ui.on_rename(title[:80])
-        except Exception:
+                log.info("ws.title.success", ws_id=ws_id[:8], title=title)
+            else:
+                log.info(
+                    "ws.title.skip",
+                    ws_id=ws_id[:8],
+                    reason="empty_title_or_ws_changed",
+                    title=title,
+                )
+                # Broadcast current name so the UI resets the "refreshing" indicator
+                if current_title and self._ws_id == ws_id:
+                    self.ui.on_rename(current_title)
+        except Exception as e:
             # Only reset if ws_id hasn't changed (e.g., via /resume) to
             # avoid re-enabling titling for a different workstream.
             if self._ws_id == ws_id:
                 self._title_generated = False
-            log.debug("Title generation failed for ws=%s", ws_id, exc_info=True)
+                # Broadcast current name so the UI resets the "refreshing" indicator
+                if current_title:
+                    self.ui.on_rename(current_title)
+            log.warning("ws.title.failed", ws_id=ws_id[:8], error=str(e), exc_info=True)
 
-    def resume(self, ws_id: str) -> bool:
+    def resume(self, ws_id: str, *, fork: bool = False) -> bool:
         """Load messages from a previous workstream and resume it.
 
-        Replaces the current conversation with the loaded messages,
-        adopting the old ws_id so new messages continue in the same
-        workstream.  Restores persisted config (temperature, reasoning_effort,
-        etc.) so the resumed workstream behaves identically to the original.
-        Returns True on success.
+        When *fork* is ``False`` (default), replaces the current
+        conversation with the loaded messages **and adopts the old
+        ws_id** so new messages continue in the same workstream.
+
+        When *fork* is ``True``, the messages are copied but
+        ``self._ws_id`` is **kept unchanged** — the fork gets its own
+        identity while inheriting the conversation history.
+
+        Restores persisted config (temperature, reasoning_effort, etc.)
+        so the resumed/forked workstream behaves identically to the
+        original.  Returns True on success.
         """
         messages = load_messages(ws_id)
         if not messages:
             return False
-        self._ws_id = ws_id
+        if not fork:
+            self._ws_id = ws_id
         self.messages = messages
         self._read_files.clear()
         self._recent_tool_sigs.clear()
@@ -1084,6 +1134,24 @@ class ChatSession:
                     self._skill_name = None
             if "notify_on_complete" in config:
                 self._notify_on_complete = config["notify_on_complete"]
+        # When forking, persist the copied messages and restored config under
+        # the fork's own ws_id so they survive restarts.
+        if fork:
+            for msg in self.messages:
+                role = msg.get("role", "user")
+                content = msg.get("content", "")
+                name = msg.get("name")
+                tool_call_id = msg.get("tool_call_id")
+                save_message(self._ws_id, role, content, name, tool_call_id=tool_call_id)
+            self._save_config()
+            self._title_generated = False  # allow auto-title for the fork
+            log.info(
+                "ws.fork.messages_copied",
+                source_ws_id=ws_id[:8],
+                fork_ws_id=self._ws_id[:8],
+                message_count=len(self.messages),
+            )
+
         if self._mem_cfg.nudges and should_nudge(
             "resume",
             self._metacog_state,
