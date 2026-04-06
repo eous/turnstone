@@ -2334,6 +2334,7 @@ function renderTabBar() {
 
     tabList.appendChild(tab);
   });
+  updateWsActionButtons();
 }
 
 function updateTabIndicator(wsId, state, extra) {
@@ -3582,17 +3583,10 @@ function getCurrentWsId() {
 }
 
 function updateWsActionButtons() {
-  var hasActiveWs = !!getCurrentWsId();
-  var ids = [
-    "refresh-title-btn",
-    "edit-title-btn",
-    "fork-ws-btn",
-    "delete-ws-btn",
-  ];
-  ids.forEach(function (id) {
-    var el = document.getElementById(id);
-    if (el) el.style.display = hasActiveWs ? "" : "none";
-  });
+  var group = document.getElementById("ws-action-group");
+  if (group) {
+    group.classList.toggle("hidden", !getCurrentWsId());
+  }
 }
 
 function forkWorkstream() {
@@ -4760,11 +4754,20 @@ function loadInterfaceSettings() {
       for (var i = 0; i < settings.length; i++) {
         var s = settings[i];
         if (s.key && s.key.indexOf("interface.") === 0) {
+          var lsKey = "turnstone_" + s.key;
           try {
-            localStorage.setItem("turnstone_" + s.key, s.value);
+            // Only write server value if no local value exists — this
+            // preserves the user's theme choice when switching between
+            // nodes via the console proxy (each node may return a
+            // different default).
+            if (!localStorage.getItem(lsKey) && s.source === "storage") {
+              localStorage.setItem(lsKey, s.value);
+            }
           } catch (_) {}
         }
       }
+      // Apply theme from localStorage (set by theme.js initTheme or
+      // a previous toggle) — don't let a node's default override it.
       var theme = localStorage.getItem("turnstone_interface.theme");
       var currentTheme = document.documentElement.dataset.theme;
       if (theme) {

@@ -53,7 +53,7 @@
 @media (max-width: 600px) {
   .ws-tab .tab-close { opacity: 1; padding: 4px 6px; font-size: 16px; }
   #split-btn { display: none; }
-  #refresh-title-btn { display: none; }
+  #refresh-title-btn { display: none !important; }
   .ws-action-btn { padding: 4px 6px; margin: 0 1px; font-size: 13px; }
   .tab-wsid { display: none; }
 }
@@ -159,6 +159,7 @@
   font-family: inherit;
   font-size: 14px;
   line-height: 1;
+  flex-shrink: 0;
   transition: background 0.15s, color 0.15s, border-color 0.15s;
 }
 #new-tab-btn:hover { background: var(--bg-highlight); color: var(--accent); border-color: var(--accent); }
@@ -173,6 +174,7 @@
   font-family: inherit;
   font-size: 13px;
   line-height: 1;
+  flex-shrink: 0;
   transition: color 0.15s, border-color 0.15s, background 0.15s;
   margin-left: 2px;
 }
@@ -194,6 +196,9 @@
 .ws-action-btn:hover { background: var(--bg-highlight); color: var(--fg-bright); border-color: var(--accent); }
 .ws-action-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 .ws-action-btn-danger:hover { color: var(--red); border-color: var(--red); }
+.ws-action-group { display: flex; align-items: center; flex-shrink: 0; }
+.ws-action-group.hidden { display: none; }
+.tab-bar-sep { width: 1px; height: 16px; background: var(--border-strong); margin: 0 4px; flex-shrink: 0; }
 .header-spacer { flex: 1; }
 
 /* Edit title & delete modals */
