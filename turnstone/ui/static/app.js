@@ -2482,7 +2482,7 @@ function showNewWsModal(forkFromWsId) {
   modelSelect.appendChild(defaultOpt);
   var defJudgeOpt = document.createElement("option");
   defJudgeOpt.value = "";
-  defJudgeOpt.textContent = "Default \u2014 use workstream's agent model";
+  defJudgeOpt.textContent = "Default (agent model)";
   judgeSelect.appendChild(defJudgeOpt);
   authFetch("/v1/api/models")
     .then(function (r) {

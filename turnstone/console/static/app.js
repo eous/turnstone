@@ -1314,7 +1314,7 @@ function showNewWsModal() {
 
   var defaultJudgeOpt = document.createElement("option");
   defaultJudgeOpt.value = "";
-  defaultJudgeOpt.textContent = "Default \u2014 use workstream's agent model";
+  defaultJudgeOpt.textContent = "Default (agent model)";
   judgeSelect.appendChild(defaultJudgeOpt);
 
   authFetch("/v1/api/models")
