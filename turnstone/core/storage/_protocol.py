@@ -207,8 +207,27 @@ class StorageBackend(Protocol):
 
     # -- Workstream management -------------------------------------------------
 
-    def list_workstreams_with_history(self, limit: int = 20) -> list[Any]:
-        """List workstreams that have messages, ordered by updated DESC."""
+    def list_workstreams_with_history(
+        self,
+        limit: int = 20,
+        *,
+        kind: WorkstreamKind | str | None = None,
+        user_id: str | None = None,
+    ) -> list[Any]:
+        """List workstreams that have messages, ordered by updated DESC.
+
+        ``kind`` filters at the SQL layer — pass ``WorkstreamKind.INTERACTIVE``
+        from the interactive "saved workstreams" sidebar so coordinator rows
+        (which also persist conversation history) don't leak into that
+        surface.  Default ``None`` preserves the legacy all-kinds behaviour.
+
+        ``user_id`` pushes ``WHERE user_id = :user_id`` into SQL so tenant
+        scoping is enforced server-side rather than relying on handlers to
+        remember a client-side filter.  Pass the authenticated caller's
+        uid from any tenant-visible endpoint; pass ``None`` for
+        service-scoped callers that legitimately need cluster-wide
+        visibility.  Mirrors the same contract on ``list_workstreams``.
+        """
         ...
 
     def prune_workstreams(self, retention_days: int = 90) -> tuple[int, int]:

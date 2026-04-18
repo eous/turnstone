@@ -344,10 +344,31 @@ def update_workstream_name(ws_id: str, name: str) -> None:
         log.warning("Failed to update workstream name ws=%s", ws_id, exc_info=True)
 
 
-def list_workstreams_with_history(limit: int = 20) -> list[Any]:
-    """List workstreams that have conversation messages."""
+def list_workstreams_with_history(
+    limit: int = 20,
+    *,
+    kind: WorkstreamKind | str | None = None,
+    user_id: str | None = None,
+) -> list[Any]:
+    """List workstreams that have conversation messages.
+
+    ``kind`` forwards to the storage layer's SQL-side filter — pass
+    ``WorkstreamKind.INTERACTIVE`` from the interactive "saved
+    workstreams" endpoint so coordinator rows (which persist
+    conversation history too) don't leak into that sidebar.  Default
+    ``None`` preserves legacy all-kinds behaviour.
+
+    ``user_id`` enforces tenant scoping at the SQL layer.  Pass the
+    authenticated caller's uid from any tenant-visible endpoint;
+    leaving it as ``None`` means cluster-wide (service-scoped
+    callers only).
+    """
     try:
-        return get_storage().list_workstreams_with_history(limit)
+        return get_storage().list_workstreams_with_history(
+            limit,
+            kind=kind,
+            user_id=user_id,
+        )
     except Exception:
         log.warning("Failed to list workstreams with history", exc_info=True)
         return []
