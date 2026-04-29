@@ -1213,3 +1213,111 @@ class TestTenantCheckOnReadEndpoints:
         r = client.get(f"/v1/api/workstreams/{ws_id}/history")
         assert r.status_code == 200
         assert any(m.get("content") == "hello" for m in r.json()["messages"])
+
+    def test_history_cold_cache_falls_through_to_storage_via_thread(self, _inject_storage):
+        """Regression: ``cfg.tenant_check`` is invoked through
+        ``await asyncio.to_thread(...)`` so the synchronous
+        ``resolve_workstream_owner`` storage fallback no longer
+        blocks the event loop on a cold cache.
+
+        Wires the real :func:`resolve_workstream_owner` as the
+        tenant_check (instead of the fake ``allow``/``deny`` of the
+        sibling tests above), forces ``mgr.get`` to miss, asserts
+        the handler still resolves through the storage row, and
+        spies on ``asyncio.to_thread`` to pin the offload — reverting
+        the wrap to a sync ``cfg.tenant_check(...)`` call would leave
+        the storage fallback working but trip the spy assertion.
+        """
+        import asyncio
+
+        from turnstone.core.web_helpers import resolve_workstream_owner
+
+        ws_id = "ws-cold-cache-hist"
+        _inject_storage.register_workstream(ws_id, kind="interactive", user_id="test-user")
+        _inject_storage.save_message(ws_id, "user", "from cold storage")
+        mock_mgr = MagicMock()
+        # Cold cache: nothing in memory, owner row only in storage.
+        mock_mgr.get.return_value = None
+
+        def cold_check(request: Any, ws_id: str, mgr: Any) -> JSONResponse | None:
+            _owner, err = resolve_workstream_owner(
+                request, ws_id, mgr=mgr, not_found_label="Workstream not found"
+            )
+            return err
+
+        offloaded: list[Any] = []
+        real_to_thread = asyncio.to_thread
+
+        async def spy_to_thread(func: Any, *args: Any, **kwargs: Any) -> Any:
+            offloaded.append(func)
+            return await real_to_thread(func, *args, **kwargs)
+
+        client = _build_history_app(mock_mgr, _inject_storage, tenant_check=cold_check)
+        with patch("asyncio.to_thread", spy_to_thread):
+            r = client.get(f"/v1/api/workstreams/{ws_id}/history")
+
+        assert r.status_code == 200
+        assert any(m.get("content") == "from cold storage" for m in r.json()["messages"])
+        # Pin the offload — reverting ``await asyncio.to_thread(cfg.tenant_check, ...)``
+        # to ``cfg.tenant_check(...)`` leaves the response shape intact
+        # but drops ``cold_check`` from the spy's call list.
+        assert cold_check in offloaded, (
+            f"tenant_check must be invoked through asyncio.to_thread; got {offloaded}"
+        )
+
+    def test_detail_cold_cache_falls_through_to_storage_via_thread(self, _inject_storage):
+        """Detail counterpart to the cold-cache history test.
+
+        Forces ``mgr.get`` to miss and pins the lazy-rehydrate to a
+        mocked ``mgr.open`` so the test covers the path where the
+        wrapped ``tenant_check`` resolves through storage *before* the
+        handler reaches its rehydrate ladder.  Same ``asyncio.to_thread``
+        spy as the history test pins the offload itself.
+        """
+        import asyncio
+
+        from turnstone.core.web_helpers import resolve_workstream_owner
+
+        ws_id = "ws-cold-cache-detail"
+        _inject_storage.register_workstream(ws_id, kind="interactive", user_id="test-user")
+
+        rehydrated = MagicMock()
+        rehydrated.id = ws_id
+        rehydrated.name = "rehydrated-ws"
+        rehydrated.state = MagicMock()
+        rehydrated.state.value = "idle"
+        rehydrated.user_id = "test-user"
+        rehydrated.kind = "interactive"
+        rehydrated.ui = None  # bypass pending-approval serializer
+        mock_mgr = MagicMock()
+        mock_mgr.get.return_value = None
+        mock_mgr.open.return_value = rehydrated
+
+        def cold_check(request: Any, ws_id: str, mgr: Any) -> JSONResponse | None:
+            _owner, err = resolve_workstream_owner(
+                request, ws_id, mgr=mgr, not_found_label="Workstream not found"
+            )
+            return err
+
+        offloaded: list[Any] = []
+        real_to_thread = asyncio.to_thread
+
+        async def spy_to_thread(func: Any, *args: Any, **kwargs: Any) -> Any:
+            offloaded.append(func)
+            return await real_to_thread(func, *args, **kwargs)
+
+        client = _build_detail_app(mock_mgr, tenant_check=cold_check)
+        with patch("asyncio.to_thread", spy_to_thread):
+            r = client.get(f"/v1/api/workstreams/{ws_id}")
+
+        assert r.status_code == 200
+        body = r.json()
+        assert body["ws_id"] == ws_id
+        assert body["name"] == "rehydrated-ws"
+        # Lazy rehydrate path engaged — the handler called mgr.open after
+        # the cold-cache tenant_check resolved through storage.
+        mock_mgr.open.assert_called_once_with(ws_id)
+        # Pin the offload — see the history test for the rationale.
+        assert cold_check in offloaded, (
+            f"tenant_check must be invoked through asyncio.to_thread; got {offloaded}"
+        )
